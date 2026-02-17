@@ -488,6 +488,7 @@ export class WalletController {
         dto.amount,
         dto.tokenAddress,
         dto.tokenDecimals,
+        dto.forceLegacyTx ? { forceEip7702: true } : undefined,
       );
 
       return result;

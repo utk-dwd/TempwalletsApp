@@ -76,6 +76,28 @@ const normalizeEvmAddress = (value: string) => value.trim().toLowerCase();
 const isValidEvmAddress = (value: string) =>
   /^0x[a-f0-9]{40}$/.test(normalizeEvmAddress(value));
 
+const formatUnits = (value: string, decimals: number, maxFractionDigits = 6) => {
+  try {
+    const v = BigInt((value || '0').trim());
+    const d = Math.max(0, Math.min(36, decimals || 0));
+    const base = 10n ** BigInt(d);
+    const whole = v / base;
+    const frac = v % base;
+
+    if (frac === 0n || maxFractionDigits === 0) return whole.toString();
+
+    let fracStr = frac.toString().padStart(d, '0');
+    // Trim trailing zeros, then limit fraction digits
+    fracStr = fracStr.replace(/0+$/, '');
+    if (fracStr.length > maxFractionDigits) {
+      fracStr = fracStr.slice(0, maxFractionDigits).replace(/0+$/, '');
+    }
+    return fracStr ? `${whole.toString()}.${fracStr}` : whole.toString();
+  } catch {
+    return '0';
+  }
+};
+
 const extractPrimaryEvmAddressFromUiPayload = (payload: any): string | null => {
   const smartAddress = payload?.smartAccount?.address;
   if (typeof smartAddress === 'string' && smartAddress.trim()) {
@@ -456,15 +478,6 @@ export default function App() {
     () => NETWORK_ITEM_BY_ID[selectedNetworkId] || NETWORK_ITEM_BY_ID.ethereumErc4337,
     [selectedNetworkId]
   );
-  const selectedBalance = useMemo(
-    () =>
-      NETWORK_BASE_ASSET_BY_ID[selectedNetwork.id] || {
-        amount: `0.00 ${selectedNetwork.symbol}`,
-        usdValue: '$0.00',
-        changePct: '+0.00%',
-      },
-    [selectedNetwork]
-  );
   const selectedChain = useMemo(() => {
     const name = selectedNetwork.name.toLowerCase();
     if (name.includes('ethereum')) return 'ethereum';
@@ -485,13 +498,56 @@ export default function App() {
     };
     return map[selectedChain] || 1;
   }, [selectedChain]);
-  const selectedAsset = useMemo(
-    () =>
-      anyAssets.find((asset) => asset.chain?.toLowerCase().includes(selectedChain)) ||
-      chainTokenBalances[0] ||
-      null,
-    [anyAssets, chainTokenBalances, selectedChain]
+
+  // Prefer the native asset for the selected chain for display and sends.
+  const selectedNativeAsset = useMemo(() => {
+    const nativeFromChain = chainTokenBalances.find((t) => (t as any)?.address === null) as any;
+    if (nativeFromChain) return nativeFromChain;
+
+    const nativeFromAny = anyAssets.find(
+      (asset) =>
+        (asset as any)?.address === null &&
+        String((asset as any)?.chain || '')
+          .toLowerCase()
+          .includes(selectedChain)
+    ) as any;
+    return nativeFromAny || null;
+  }, [anyAssets, chainTokenBalances, selectedChain]);
+
+  const selectedNativeHuman = useMemo(() => {
+    if (!selectedNativeAsset) return '0';
+    const fromApi = (selectedNativeAsset as any).balanceHuman;
+    if (typeof fromApi === 'string' && fromApi.trim()) return fromApi.trim();
+    const decimals = Number((selectedNativeAsset as any).decimals ?? 18);
+    const bal = String((selectedNativeAsset as any).balance ?? '0');
+    return formatUnits(bal, decimals, 6);
+  }, [selectedNativeAsset]);
+
+  const selectedNativeSymbol = useMemo(() => {
+    const sym = (selectedNativeAsset as any)?.symbol;
+    return typeof sym === 'string' && sym.trim() ? sym.trim() : 'ETH';
+  }, [selectedNativeAsset]);
+
+  const selectedBalance = useMemo(
+    () => ({
+      amount: `${selectedNativeHuman} ${selectedNativeSymbol}`,
+      usdValue: '$0.00',
+      changePct: '+0.00%',
+    }),
+    [selectedNativeHuman, selectedNativeSymbol]
   );
+
+  const recentAnyTransactions = useMemo(() => {
+    const map = new Map<string, WalletTx>();
+    for (const tx of anyTransactions) {
+      const key = `${String(tx.chain || '').toLowerCase()}:${String(tx.txHash || '').toLowerCase()}`;
+      if (!key.includes(':') || key.endsWith(':')) continue;
+      if (!map.has(key)) map.set(key, tx);
+    }
+    const list = Array.from(map.values());
+    list.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    return list;
+  }, [anyTransactions]);
 
   useEffect(() => {
     const loadAuthState = async () => {
@@ -562,6 +618,22 @@ export default function App() {
   useEffect(() => {
     refreshSelectedChainData(false);
   }, [authToken, authUser?.id, selectedChain]);
+
+  useEffect(() => {
+    if (activeTab !== 'transactions') return;
+    const run = async () => {
+      try {
+        const baseUrl = await resolveApiBaseUrl();
+        const token = authToken;
+        const userId = authUser?.id || (await getOrCreateFingerprint());
+        const txAny = await walletApi.getTransactionsAny(baseUrl, token, 100, { userId } as any);
+        setAnyTransactions(txAny);
+      } catch {
+        // ignore (rate limit / offline)
+      }
+    };
+    run();
+  }, [activeTab, authToken, authUser?.id]);
 
   useEffect(() => {
     let loop: Animated.CompositeAnimation | null = null;
@@ -691,20 +763,35 @@ export default function App() {
       const baseUrl = await resolveApiBaseUrl();
       const token = authToken;
       const userId = authUser?.id || (await getOrCreateFingerprint());
-      const [uiAddresses, balances, assets, txAny, paymaster] = await Promise.all([
-        walletApi.getAddresses(baseUrl, token, { userId }),
-        walletApi.getBalances(baseUrl, token, { userId, refresh }),
-        walletApi.getAssetsAny(baseUrl, token, { userId, refresh }),
-        walletApi.getTransactionsAny(baseUrl, token, 100, { userId, refresh } as any),
-        walletApi.getPaymasterBalances(baseUrl, token, { userId }),
-      ]);
+      const uiAddresses = await walletApi.getAddresses(baseUrl, token, { userId });
       setWalletAddresses(uiAddresses);
       const primaryAddress = extractPrimaryEvmAddressFromUiPayload(uiAddresses);
       if (primaryAddress) setWalletAddress(normalizeEvmAddress(primaryAddress));
-      setChainBalances(balances);
-      setAnyAssets(assets);
-      setAnyTransactions(txAny);
-      setPaymasterBalances(paymaster);
+
+      const [balancesRes, assetsRes, paymasterRes] = await Promise.allSettled([
+        walletApi.getBalances(baseUrl, token, { userId, refresh }),
+        walletApi.getAssetsAny(baseUrl, token, { userId, refresh }),
+        walletApi.getPaymasterBalances(baseUrl, token, { userId }),
+      ]);
+
+      if (balancesRes.status === 'fulfilled') setChainBalances(balancesRes.value);
+      if (assetsRes.status === 'fulfilled') setAnyAssets(assetsRes.value);
+      if (paymasterRes.status === 'fulfilled') setPaymasterBalances(paymasterRes.value);
+
+      // Only fetch any-chain transactions when the Transactions tab is visible (or on explicit refresh).
+      if (activeTab === 'transactions' || refresh) {
+        try {
+          const txAny = await walletApi.getTransactionsAny(
+            baseUrl,
+            token,
+            100,
+            { userId, refresh } as any
+          );
+          setAnyTransactions(txAny);
+        } catch {
+          // Don't fail the whole screen if tx fetch is rate-limited.
+        }
+      }
     } catch (error) {
       Alert.alert('Wallet API error', error instanceof Error ? error.message : 'Failed loading wallet data');
     }
@@ -715,12 +802,12 @@ export default function App() {
       const baseUrl = await resolveApiBaseUrl();
       const token = authToken;
       const userId = authUser?.id || (await getOrCreateFingerprint());
-      const [tokens, txs] = await Promise.all([
+      const [tokensRes, txsRes] = await Promise.allSettled([
         walletApi.getTokenBalances(baseUrl, token, selectedChain, { userId, refresh }),
         walletApi.getTransactions(baseUrl, token, selectedChain, 50, { userId, refresh } as any),
       ]);
-      setChainTokenBalances(tokens);
-      setChainTransactions(txs);
+      if (tokensRes.status === 'fulfilled') setChainTokenBalances(tokensRes.value);
+      if (txsRes.status === 'fulfilled') setChainTransactions(txsRes.value);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Failed loading chain data';
       Alert.alert(
@@ -1267,11 +1354,11 @@ export default function App() {
           setWalletAddresses(created.addresses);
         }
 
-        await Promise.all([
-          loadWalletRuntimeData(true),
-          refreshSelectedChainData(true),
-          ...(authToken ? [loadWalletHistory()] : []),
-        ]);
+        await loadWalletRuntimeData(true);
+        await refreshSelectedChainData(true);
+        if (authToken) {
+          await loadWalletHistory();
+        }
         setCopied(false);
         Alert.alert('Wallet created', 'A new wallet seed and address were generated.');
       } catch (error) {
@@ -1311,39 +1398,21 @@ export default function App() {
       const baseUrl = await resolveApiBaseUrl();
       const token = authToken;
       const userId = await resolveWalletUserId();
-      if (selectedNetwork.badge !== 'EOA') {
-        const support = await walletApi.testEip7702Support(baseUrl, token, selectedChain);
-        if (!support?.supported) {
-          throw new Error(`${selectedChain} does not support gasless send right now.`);
-        }
-        const sendResult = await walletApi.sendEip7702(baseUrl, token, {
-          userId,
-          chainId: selectedChainId,
-          recipientAddress: normalizeEvmAddress(recipientAddress),
-          amount: sendAmount.trim(),
-        });
-        const userOpHash: string | undefined = sendResult?.userOpHash || sendResult?.hash;
-        if (userOpHash) {
-          await walletApi.waitForEip7702Confirmation(baseUrl, token, {
-            chainId: selectedChainId,
-            userOpHash,
-            timeoutMs: 90000,
-          }).catch(() => undefined);
-        }
-        Alert.alert('Gasless transaction sent', `UserOp: ${userOpHash || 'submitted'}`);
-      } else {
-        const sendResult = await walletApi.sendCrypto(baseUrl, token, {
-          userId,
-          chain: selectedChain,
-          amount: sendAmount.trim(),
-          recipientAddress: normalizeEvmAddress(recipientAddress),
-        });
-        Alert.alert('Transaction sent', `Tx hash: ${sendResult.txHash || 'submitted'}`);
-      }
+      // Default to legacy transactions (EOA-style) for reliability.
+      // The backend can auto-route to gasless on EIP-7702 chains, but that depends on paymaster config.
+      const sendResult = await walletApi.sendCrypto(baseUrl, token, {
+        userId,
+        chain: selectedChain,
+        amount: sendAmount.trim(),
+        recipientAddress: normalizeEvmAddress(recipientAddress),
+        forceLegacyTx: true,
+      });
+      Alert.alert('Transaction sent', `Tx hash: ${sendResult.txHash || 'submitted'}`);
       setShowSendModal(false);
       setSendAmount('');
       setRecipientAddress('');
-      await Promise.all([loadWalletRuntimeData(true), refreshSelectedChainData(true)]);
+      await loadWalletRuntimeData(true);
+      await refreshSelectedChainData(true);
     } catch (error) {
       Alert.alert('Send failed', error instanceof Error ? error.message : 'Transaction failed.');
     } finally {
@@ -1377,11 +1446,11 @@ export default function App() {
   const handleWalletRefresh = async () => {
     try {
       setWalletBusy(true);
-      await Promise.all([
-        loadWalletRuntimeData(true),
-        refreshSelectedChainData(true),
-        ...(authToken ? [loadWalletHistory()] : []),
-      ]);
+      await loadWalletRuntimeData(true);
+      await refreshSelectedChainData(true);
+      if (authToken) {
+        await loadWalletHistory();
+      }
     } finally {
       setWalletBusy(false);
     }
@@ -1585,11 +1654,7 @@ export default function App() {
                 </Text>
                 <View style={styles.balancePanelTopRow}>
                   <Text style={styles.balancePanelAmount}>
-                    {hideBalances
-                      ? '******'
-                      : selectedAsset?.balanceHuman
-                        ? `$${Number(selectedAsset.balanceHuman).toFixed(2)}`
-                        : selectedBalance.usdValue}
+                    {hideBalances ? '******' : `${selectedNativeHuman} ${selectedNativeSymbol}`}
                   </Text>
                   <View style={styles.balanceChangePill}>
                     <Ionicons name="trending-up" size={12} color="#16a34a" />
@@ -1611,18 +1676,10 @@ export default function App() {
                   </View>
                   <View style={styles.balanceTokenRight}>
                     <Text style={styles.balanceTokenUsd}>
-                      {hideBalances
-                        ? '****'
-                        : selectedAsset?.balanceHuman
-                          ? `$${Number(selectedAsset.balanceHuman).toFixed(2)}`
-                          : '$0.00'}
+                      {hideBalances ? '****' : selectedBalance.usdValue}
                     </Text>
                     <Text style={styles.balanceTokenNative}>
-                      {hideBalances
-                        ? '****'
-                        : selectedAsset
-                          ? `${selectedAsset.balance} ${selectedAsset.symbol}`
-                          : selectedBalance.amount}
+                      {hideBalances ? '****' : `${selectedNativeHuman} ${selectedNativeSymbol}`}
                     </Text>
                   </View>
                 </View>
@@ -1634,11 +1691,15 @@ export default function App() {
                   </View>
                 ) : (
                   <View style={styles.profileSection}>
-                    <Text style={styles.profileSectionTitle}>Chain Token Balances</Text>
+                    <Text style={styles.txSectionTitle}>Chain Token Balances</Text>
                     {chainTokenBalances.slice(0, 5).map((token) => (
                       <View key={`${token.chain}-${token.symbol}-${token.address || 'native'}`} style={styles.statRow}>
                         <Text style={styles.statLabel}>{token.symbol}</Text>
-                        <Text style={styles.statValue}>{token.balance}</Text>
+                        <Text style={styles.statValue}>
+                          {typeof (token as any).balanceHuman === 'string'
+                            ? (token as any).balanceHuman
+                            : formatUnits(String((token as any).balance ?? '0'), Number((token as any).decimals ?? 18), 6)}
+                        </Text>
                       </View>
                     ))}
                   </View>
@@ -1648,23 +1709,36 @@ export default function App() {
 
             {activeTab === 'transactions' && (
               <>
-                {anyTransactions.length === 0 ? (
+                {recentAnyTransactions.length === 0 ? (
                   <View style={styles.emptyState}>
                     <Image source={require('./assets/empty-mailbox.gif')} style={styles.emptyImage} />
                     <Text style={styles.emptyText}>No transactions yet</Text>
                   </View>
                 ) : (
                   <View style={styles.profileSection}>
-                    <Text style={styles.profileSectionTitle}>Recent Transactions</Text>
-                    {anyTransactions.slice(0, 8).map((tx) => (
-                      <View key={`${tx.chain}-${tx.txHash}`} style={styles.activityItem}>
-                        <View>
-                          <Text style={styles.activityAction}>{tx.chain.toUpperCase()}</Text>
-                          <Text style={styles.activityMeta} numberOfLines={1}>
+                    <Text style={styles.txSectionTitle}>
+                      Recent Transactions ({Math.min(recentAnyTransactions.length, 8)})
+                    </Text>
+                    {recentAnyTransactions.slice(0, 8).map((tx) => (
+                      <View key={`${tx.chain}-${tx.txHash}`} style={styles.txItem}>
+                        <View style={styles.txLeft}>
+                          <Text style={styles.txChain}>{String(tx.chain || '').toUpperCase()}</Text>
+                          <Text style={styles.txHash} numberOfLines={1}>
                             {shortAddress(tx.txHash)}
                           </Text>
                         </View>
-                        <Text style={styles.activityTimestamp}>{tx.status}</Text>
+                        <Text
+                          style={[
+                            styles.txStatus,
+                            tx.status === 'success'
+                              ? styles.txStatusSuccess
+                              : tx.status === 'failed'
+                                ? styles.txStatusFailed
+                                : styles.txStatusPending,
+                          ]}
+                        >
+                          {tx.status}
+                        </Text>
                       </View>
                     ))}
                   </View>
@@ -1920,10 +1994,10 @@ export default function App() {
           <View style={styles.sendModalCard}>
             <View style={styles.sendHeaderRow}>
               <View style={styles.sendNetworkBadge}>
-                <Image source={{ uri: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/info/logo.png' }} style={styles.sendNetworkLogo} />
-                <Text style={styles.sendNetworkText}>Ethereum</Text>
+                <Image source={{ uri: selectedNetwork.logo }} style={styles.sendNetworkLogo} />
+                <Text style={styles.sendNetworkText}>{selectedNetwork.name}</Text>
               </View>
-              <Pressable style={styles.sendChangeButton}>
+              <Pressable style={styles.sendChangeButton} onPress={() => setShowNetworkList(true)}>
                 <Text style={styles.sendChangeText}>CHANGE</Text>
                 <Ionicons name="chevron-down" size={12} color="#cbd5e1" />
               </Pressable>
@@ -1934,7 +2008,7 @@ export default function App() {
 
             <Text style={styles.sendSubtitle}>Transfer to recipient&apos;s address</Text>
             <Text style={styles.sendLabel}>Token</Text>
-            <Text style={styles.sendWarning}>No tokens available for this network from Zerion assets.</Text>
+            <Text style={styles.sendTokenValue}>{selectedNativeSymbol} (native)</Text>
 
             <Text style={styles.sendLabel}>Amount</Text>
             <TextInput
@@ -3567,6 +3641,12 @@ const styles = StyleSheet.create({
     lineHeight: 22 / 1.2,
     marginBottom: 14,
   },
+  sendTokenValue: {
+    color: '#e5e7eb',
+    fontSize: 14 / 1.2,
+    fontWeight: '700',
+    marginBottom: 14,
+  },
   sendInput: {
     height: 44,
     borderRadius: 14,
@@ -3732,6 +3812,52 @@ const styles = StyleSheet.create({
     borderColor: '#1f2532',
     backgroundColor: '#111827',
     padding: 10,
+  },
+  txSectionTitle: {
+    color: '#0f172a',
+    fontSize: 12,
+    fontWeight: '800',
+    marginTop: 8,
+  },
+  txItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#111827',
+    backgroundColor: '#0b1220',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+  },
+  txLeft: {
+    flex: 1,
+    paddingRight: 10,
+  },
+  txChain: {
+    color: '#e5e7eb',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  txHash: {
+    color: '#94a3b8',
+    fontSize: 11,
+    marginTop: 4,
+  },
+  txStatus: {
+    fontSize: 11,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  txStatusSuccess: {
+    color: '#22c55e',
+  },
+  txStatusFailed: {
+    color: '#ef4444',
+  },
+  txStatusPending: {
+    color: '#f59e0b',
   },
   activityType: {
     color: '#93c5fd',

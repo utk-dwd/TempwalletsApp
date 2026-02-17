@@ -3,6 +3,7 @@ import {
   IsNotEmpty,
   IsIn,
   IsOptional,
+  IsBoolean,
   ValidateIf,
   Matches,
   IsNumber,
@@ -73,6 +74,15 @@ export class SendCryptoDto {
   @IsString()
   @IsNotEmpty()
   recipientAddress: string;
+
+  /**
+   * If true, bypass the backend's auto-routing of native sends on EIP-7702-enabled chains
+   * to the gasless flow. This is useful when paymaster/Pimlico is not configured and you
+   * want a standard legacy transaction.
+   */
+  @IsOptional()
+  @IsBoolean()
+  forceLegacyTx?: boolean;
 }
 
 export class SendEip7702Dto {

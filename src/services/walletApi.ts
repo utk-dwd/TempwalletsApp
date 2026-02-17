@@ -154,6 +154,7 @@ export const walletApi = {
       tokenDecimals?: number;
       amount: string;
       recipientAddress: string;
+      forceLegacyTx?: boolean;
     }
   ) {
     return requestWithAuth<{ txHash: string }>(baseUrl, token, '/wallet/send', {

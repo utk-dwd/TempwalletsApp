@@ -1319,19 +1319,16 @@ export class WalletService {
           continue;
         }
 
-        // Find native token in portfolio
+        // Find native token in positions array.
+        // Zerion `quantity.int` is already the smallest-unit integer for that asset.
         const nativeToken = portfolio.data.find(
-          (token) =>
-            token.type === 'native' || !token.attributes?.fungible_info,
+          (token) => token.type === 'native' || !token.attributes?.fungible_info,
         );
 
         let balance = '0';
-        if (nativeToken?.attributes?.quantity) {
-          const quantity = nativeToken.attributes.quantity;
-          // Combine int and decimals parts
-          const intPart = quantity.int || '0';
-          const decimals = quantity.decimals || 0;
-          balance = `${intPart}${'0'.repeat(Math.max(0, 18 - decimals))}`;
+        const intPart = nativeToken?.attributes?.quantity?.int;
+        if (typeof intPart === 'string' && intPart.trim()) {
+          balance = intPart.trim();
         }
 
         balances.push({
@@ -2073,15 +2070,19 @@ export class WalletService {
       throw new BadRequestException('Amount must be a positive number');
     }
 
+    // NOTE: `forceEip7702` option name is historical; in the mobile app we use it
+    // to bypass auto-routing to gasless and force a legacy EOA transaction.
     const forceEip7702 = options?.forceEip7702 === true;
-    const isEip7702Chain = this.pimlicoConfig.isEip7702Enabled(chain);
+    const isEip7702Chain =
+      this.pimlicoConfig.isEip7702Enabled(chain) && !forceEip7702;
     const accountType = isEip7702Chain ? 'EIP-7702' : 'EOA';
 
     try {
       const seedPhrase = await this.seedRepository.getSeedPhrase(userId);
 
-      // Auto-route native sends on EIP-7702 enabled chains to the gasless flow to avoid zeroed gas fields
-      if (isEip7702Chain && !tokenAddress && !forceEip7702) {
+      // Auto-route native sends on EIP-7702 enabled chains to the gasless flow to avoid zeroed gas fields.
+      // If `forceEip7702` is set, we intentionally bypass this and use legacy EOA sending.
+      if (isEip7702Chain && !tokenAddress) {
         const chainId = this.pimlicoConfig.getEip7702Config(
           chain as
             | 'ethereum'
@@ -2110,12 +2111,26 @@ export class WalletService {
         return { txHash: result.transactionHash || result.userOpHash };
       }
 
-      // Create account using appropriate factory
-      const account = await this.createAccountForChain(
-        seedPhrase,
-        chain,
-        userId,
-      );
+      // Create account using appropriate factory.
+      // If forceEip7702=true, use a legacy EOA even if the chain has EIP-7702 enabled.
+      const legacyEvmChains: Array<AllChainTypes> = [
+        'ethereum',
+        'base',
+        'arbitrum',
+        'optimism',
+        'polygon',
+        'avalanche',
+        'bnb',
+      ];
+
+      const account =
+        forceEip7702 && legacyEvmChains.includes(chain)
+          ? await this.nativeEoaFactory.createAccount(
+              seedPhrase,
+              chain as any,
+              0,
+            )
+          : await this.createAccountForChain(seedPhrase, chain, userId);
       const walletAddress = await account.getAddress();
 
       this.logger.log(
@@ -2849,10 +2864,12 @@ export class WalletService {
     forceRefresh: boolean = false,
   ): Promise<
     Array<{
+      chain: string;
       address: string | null;
       symbol: string;
       balance: string;
       decimals: number;
+      balanceHuman?: string;
     }>
   > {
     this.logger.debug(
@@ -2900,26 +2917,28 @@ export class WalletService {
       }
 
       const tokens: Array<{
+        chain: string;
         address: string | null;
         symbol: string;
         balance: string;
         decimals: number;
+        balanceHuman?: string;
       }> = [];
 
-      // Process each token in portfolio
+      // Process each token in positions array
       for (const tokenData of portfolio.data) {
         try {
           const quantity = tokenData.attributes?.quantity;
           if (!quantity) continue;
 
-          const intPart = quantity.int || '0';
-          const decimals = quantity.decimals || 0;
-
-          // Convert to standard format (18 decimals)
-          const balance = `${intPart}${'0'.repeat(Math.max(0, 18 - decimals))}`;
-
-          // Skip zero balances
-          if (parseFloat(balance) === 0) continue;
+          const intPart = (quantity.int || '0').trim();
+          // Skip zero balances (use BigInt for correctness)
+          try {
+            if (BigInt(intPart) === 0n) continue;
+          } catch {
+            // If Zerion ever returns a non-integer string, fall back to a safe parse
+            if (!intPart || intPart === '0') continue;
+          }
 
           // Determine if native token or ERC-20
           const isNative =
@@ -2930,28 +2949,34 @@ export class WalletService {
             // Native token
             const nativeSymbol = this.getNativeTokenSymbol(chain);
             const nativeDecimals = this.getNativeTokenDecimals(chain);
+            const finalDecimals = quantity.decimals ?? nativeDecimals;
 
             tokens.push({
+              chain,
               address: null,
               symbol: nativeSymbol,
-              balance,
-              decimals: nativeDecimals,
+              balance: intPart,
+              decimals: finalDecimals,
+              balanceHuman: this.convertSmallestToHuman(intPart, finalDecimals),
             });
           } else if (fungibleInfo) {
             // ERC-20 token
             const tokenAddress =
               fungibleInfo.implementations?.[0]?.address || null;
             const symbol = fungibleInfo.symbol || 'UNKNOWN';
-            // Use smart fallback for known tokens
+            // Prefer Zerion-provided decimals from `quantity`, then fallback.
             const tokenDecimals =
+              quantity.decimals ??
               fungibleInfo.decimals ??
               this.getDefaultDecimals(chain, tokenAddress);
 
             tokens.push({
+              chain,
               address: tokenAddress,
               symbol,
-              balance,
+              balance: intPart,
               decimals: tokenDecimals,
+              balanceHuman: this.convertSmallestToHuman(intPart, tokenDecimals),
             });
           }
         } catch (error) {

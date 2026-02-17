@@ -647,16 +647,21 @@ export class ZerionService {
             if (matchingChainKey && positionsByChain[matchingChainKey]) {
               allPositions = positionsByChain[matchingChainKey];
             } else {
-              // Chain_ids parameter may not have worked - get all positions and filter client-side
+              // Chain_ids parameter may not have worked - get all positions and filter client-side.
+              // Be defensive: Zerion response shapes may vary (avoid spreading non-arrays).
               Object.values(positionsByChain).forEach((positions) => {
-                allPositions.push(...positions);
+                if (Array.isArray(positions)) {
+                  allPositions.push(...positions);
+                }
               });
             }
           }
         } else {
           // No chain filter - get all positions from all chains
           Object.values(positionsByChain).forEach((positions) => {
-            allPositions.push(...positions);
+            if (Array.isArray(positions)) {
+              allPositions.push(...positions);
+            }
           });
         }
       }
@@ -710,106 +715,37 @@ export class ZerionService {
     cacheKey: string,
   ): Promise<ZerionPortfolioResponse | null> {
     try {
-      // Zerion API endpoint for portfolio
-      // Documentation: https://developers.zerion.io/reference/getwalletportfolio
-      // Endpoint: GET https://api.zerion.io/v1/wallets/{address}/portfolio
+      // IMPORTANT:
+      // Zerion's `/portfolio` response shape has changed across versions and sometimes returns
+      // summary-only data that is not reliably usable for token lists.
       //
-      // Note: The portfolio endpoint may return a summary format with positions_distribution_by_chain
-      // The chain_ids query parameter may not work, so we'll filter client-side if needed
+      // For stable balances, use `/positions/`, which consistently returns an array of positions.
+      // Documentation (positions): https://developers.zerion.io/reference/listwalletpositions
 
-      // Build URL - fetch portfolio without chain filter first (chain_ids may not work)
-      // We'll filter client-side after fetching
-      const url = `${this.baseUrl}/wallets/${address}/portfolio`;
+      const query = new URLSearchParams();
+      query.set('sort', 'value');
+      // Zerion uses short chain ids (eth, base, arbitrum...)
+      query.set('chain_ids', zerionChain);
 
-      const response = await this.makeRequest<any>(url);
+      const url = `${this.baseUrl}/wallets/${address}/positions/?${query.toString()}`;
+      const response = await this.makeRequest<ZerionPositionsArray>(url);
 
-      // Validate response structure
-      if (!response) {
+      if (!response || !Array.isArray((response as any).data)) {
         this.logger.warn(
-          `Zerion returned null response for ${address} on ${chain}`,
+          `Zerion positions response invalid for ${address} on ${chain}`,
         );
         return null;
       }
 
-      if (response.data === undefined) {
-        this.logger.warn(
-          `Zerion response missing data field for ${address} on ${chain}`,
-        );
-        return null;
-      }
+      // Dedupe defensively; Zerion can include duplicates for same token.
+      const positions = this.dedupePositions(response.data || []);
 
-      // Extract positions from response (handles both summary and array formats)
-      let positions: Array<ZerionToken> = [];
-
-      // Check if it's portfolio summary format (positions_distribution_by_chain)
-      if (
-        response.data &&
-        typeof response.data === 'object' &&
-        !Array.isArray(response.data)
-      ) {
-        if (response.data.attributes?.positions_distribution_by_chain) {
-          positions = this.extractAndFilterPositions(
-            response as ZerionPortfolioSummary,
-            zerionChain,
-          );
-        } else {
-          this.logger.warn(
-            `Portfolio response has unexpected structure for ${address} on ${chain}`,
-          );
-          return null;
-        }
-      }
-      // Check if it's positions array format
-      else if (Array.isArray(response.data)) {
-        positions = response.data;
-
-        // Filter by chain if needed (chain_ids parameter may not have worked)
-        if (zerionChain) {
-          positions = positions.filter((position) => {
-            // Check if position has relationship chain data
-            if (position.relationships?.chain?.data?.id) {
-              const positionChainId =
-                position.relationships.chain.data.id.toLowerCase();
-              return positionChainId === zerionChain.toLowerCase();
-            }
-
-            // Check if any implementation matches the requested chain
-            if (position.attributes?.fungible_info?.implementations) {
-              const implementations =
-                position.attributes.fungible_info.implementations;
-              return implementations.some((impl) => {
-                // Check if chain_id matches
-                if (impl.chain_id) {
-                  return (
-                    impl.chain_id.toLowerCase() === zerionChain.toLowerCase()
-                  );
-                }
-                // If no chain_id in implementation, we can't determine chain - include it
-                // (This is a fallback - ideally chain_ids parameter should handle filtering)
-                return true;
-              });
-            }
-
-            // Native token without chain info - include it (conservative approach)
-            return true;
-          });
-        }
-      } else {
-        this.logger.warn(
-          `Zerion returned unexpected portfolio structure for ${address} on ${chain}`,
-        );
-        return null;
-      }
-
-      // Normalize response to positions array format for consistent handling
       const normalizedResponse: ZerionPositionsArray = {
         data: positions,
-        meta: response.meta,
+        meta: (response as any).meta,
       };
 
-      // Cache the normalized response
       this.setCache(cacheKey, normalizedResponse, 'balance');
-
       return normalizedResponse;
     } catch (error) {
       this.logger.error(
