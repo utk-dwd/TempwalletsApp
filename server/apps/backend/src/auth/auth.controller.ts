@@ -77,9 +77,10 @@ export class AuthController {
         (mobileRedirectUrl.startsWith('tempwallets://') ||
           mobileRedirectUrl.startsWith('exp://') ||
           mobileRedirectUrl.startsWith('https://auth.expo.io/'));
-      const redirectUrl = useMobileRedirect
-        ? new URL(mobileRedirectUrl)
-        : new URL(`${frontendUrl}/auth/callback`);
+      const redirectUrlTarget = useMobileRedirect
+        ? (mobileRedirectUrl as string)
+        : `${frontendUrl}/auth/callback`;
+      const redirectUrl = new URL(redirectUrlTarget);
       redirectUrl.searchParams.set('token', accessToken);
       redirectUrl.searchParams.set(
         'user',

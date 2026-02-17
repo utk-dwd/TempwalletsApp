@@ -16,7 +16,16 @@ export const normalizeApiUrl = (rawUrl?: string) => {
 };
 
 export const API_URL = normalizeApiUrl(process.env.EXPO_PUBLIC_API_URL);
-export const MOBILE_API_URL = process.env.EXPO_PUBLIC_MOBILE_API_URL
-  ? normalizeApiUrl(process.env.EXPO_PUBLIC_MOBILE_API_URL)
-  : '';
+const sanitizePublicApiUrl = (raw?: string) => {
+  const value = (raw || '').trim();
+  if (!value) return '';
+  // Avoid common placeholder values that break emulator reachability checks.
+  if (value.includes('your-mobile-backend')) return '';
+  if (value.includes('example.com')) return '';
+  return normalizeApiUrl(value);
+};
+
+export const MOBILE_API_URL = sanitizePublicApiUrl(
+  process.env.EXPO_PUBLIC_MOBILE_API_URL
+);
 export const WC_PROJECT_ID = process.env.EXPO_PUBLIC_WALLETCONNECT_PROJECT_ID || '';

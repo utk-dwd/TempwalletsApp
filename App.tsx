@@ -58,7 +58,7 @@ import {
   ChainBalance,
 } from './src/services/walletApi';
 
-const INITIAL_ADDRESS = '0x52E87d9c5f3a1d2b9a7f5c8e3a1b9c0d8e3a8e3Ac';
+const INITIAL_ADDRESS = '0x52e87d9c5f3a1d2b9a7f5c8e3a1b9c0d8e3a8e3ac';
 const { width } = Dimensions.get('window');
 
 WebBrowser.maybeCompleteAuthSession();
@@ -71,6 +71,10 @@ const hexToRgba = (hex: string, alpha: number) => {
   const b = bigint & 255;
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 };
+
+const normalizeEvmAddress = (value: string) => value.trim().toLowerCase();
+const isValidEvmAddress = (value: string) =>
+  /^0x[a-f0-9]{40}$/.test(normalizeEvmAddress(value));
 
 const NETWORK_LIST = [
   {
@@ -609,6 +613,8 @@ export default function App() {
     }
   };
 
+  const getPreferredApiBaseUrl = () => MOBILE_API_URL || API_URL;
+
   const resolveGoogleAuthBaseUrl = async () => {
     const candidates = [MOBILE_API_URL, API_URL].filter(
       (url, idx, arr) => arr.indexOf(url) === idx
@@ -652,7 +658,8 @@ export default function App() {
 
   const loadWalletRuntimeData = async (refresh: boolean = false) => {
     try {
-      const baseUrl = await resolveApiBaseUrl();
+      // Wallet reads should not hard-block on /health checks.
+      const baseUrl = getPreferredApiBaseUrl();
       const token = authToken;
       const userId = authUser?.id || (await getOrCreateFingerprint());
       const [addresses, balances, assets, txAny, paymaster] = await Promise.all([
@@ -668,7 +675,7 @@ export default function App() {
         (addresses?.evm as string | undefined) ||
         '';
       if (primaryAddress) {
-        setWalletAddress(primaryAddress);
+        setWalletAddress(normalizeEvmAddress(primaryAddress));
       }
       setChainBalances(balances);
       setAnyAssets(assets);
@@ -681,7 +688,7 @@ export default function App() {
 
   const refreshSelectedChainData = async (refresh: boolean = false) => {
     try {
-      const baseUrl = await resolveApiBaseUrl();
+      const baseUrl = getPreferredApiBaseUrl();
       const token = authToken;
       const userId = authUser?.id || (await getOrCreateFingerprint());
       const [tokens, txs] = await Promise.all([
@@ -691,7 +698,13 @@ export default function App() {
       setChainTokenBalances(tokens);
       setChainTransactions(txs);
     } catch (error) {
-      Alert.alert('Chain API error', error instanceof Error ? error.message : 'Failed loading chain data');
+      const msg = error instanceof Error ? error.message : 'Failed loading chain data';
+      Alert.alert(
+        'Chain API error',
+        msg.includes('Backend is unreachable')
+          ? `Backend not running.\n\nStart your backend on ${API_URL} or set EXPO_PUBLIC_MOBILE_API_URL to your Railway backend.`
+          : msg
+      );
     }
   };
 
@@ -1195,7 +1208,7 @@ export default function App() {
     }
 
     if (actionId === 'copy') {
-      await Clipboard.setStringAsync(walletAddress);
+      await Clipboard.setStringAsync(normalizeEvmAddress(walletAddress));
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
       return;
@@ -1250,6 +1263,10 @@ export default function App() {
       Alert.alert('Recipient required', 'Enter recipient wallet address.');
       return;
     }
+    if (!isValidEvmAddress(recipientAddress)) {
+      Alert.alert('Invalid address', 'Enter a valid EVM address (0x + 40 hex chars).');
+      return;
+    }
     try {
       setWalletBusy(true);
       const baseUrl = await resolveApiBaseUrl();
@@ -1263,7 +1280,7 @@ export default function App() {
         const sendResult = await walletApi.sendEip7702(baseUrl, token, {
           userId,
           chainId: selectedChainId,
-          recipientAddress: recipientAddress.trim(),
+          recipientAddress: normalizeEvmAddress(recipientAddress),
           amount: sendAmount.trim(),
         });
         const userOpHash: string | undefined = sendResult?.userOpHash || sendResult?.hash;
@@ -1280,7 +1297,7 @@ export default function App() {
           userId,
           chain: selectedChain,
           amount: sendAmount.trim(),
-          recipientAddress: recipientAddress.trim(),
+          recipientAddress: normalizeEvmAddress(recipientAddress),
         });
         Alert.alert('Transaction sent', `Tx hash: ${sendResult.txHash || 'submitted'}`);
       }
