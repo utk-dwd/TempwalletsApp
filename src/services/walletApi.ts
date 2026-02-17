@@ -1,5 +1,6 @@
-type RequestOptions = {
+export type WalletRequestOptions = {
   userId?: string | null;
+  refresh?: boolean;
 };
 
 async function requestWithAuth<T>(
@@ -72,7 +73,11 @@ export const walletApi = {
     token: string | null | undefined,
     payload: { userId?: string; mode: 'random' | 'mnemonic'; mnemonic?: string }
   ) {
-    return requestWithAuth<{ ok: boolean }>(baseUrl, token, '/wallet/seed', {
+    return requestWithAuth<{
+      ok: boolean;
+      ethereum?: string | null;
+      addresses?: any;
+    }>(baseUrl, token, '/wallet/seed', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
@@ -102,38 +107,40 @@ export const walletApi = {
     );
   },
 
-  getAddresses(baseUrl: string, token: string | null | undefined, options?: RequestOptions) {
+  getAddresses(baseUrl: string, token: string | null | undefined, options?: WalletRequestOptions) {
     return requestWithAuth<any>(baseUrl, token, withUserId('/wallet/addresses', options?.userId));
   },
 
-  getBalances(baseUrl: string, token: string | null | undefined, options?: RequestOptions & { refresh?: boolean }) {
+  getBalances(baseUrl: string, token: string | null | undefined, options?: WalletRequestOptions & { refresh?: boolean }) {
     let endpoint = withUserId('/wallet/balances', options?.userId);
     if (options?.refresh) endpoint = `${endpoint}${endpoint.includes('?') ? '&' : '?'}refresh=true`;
     return requestWithAuth<ChainBalance[]>(baseUrl, token, endpoint);
   },
 
-  getAssetsAny(baseUrl: string, token: string | null | undefined, options?: RequestOptions & { refresh?: boolean }) {
+  getAssetsAny(baseUrl: string, token: string | null | undefined, options?: WalletRequestOptions & { refresh?: boolean }) {
     let endpoint = withUserId('/wallet/assets-any', options?.userId);
     if (options?.refresh) endpoint = `${endpoint}${endpoint.includes('?') ? '&' : '?'}refresh=true`;
     return requestWithAuth<AnyAsset[]>(baseUrl, token, endpoint);
   },
 
-  getTokenBalances(baseUrl: string, token: string | null | undefined, chain: string, options?: RequestOptions & { refresh?: boolean }) {
+  getTokenBalances(baseUrl: string, token: string | null | undefined, chain: string, options?: WalletRequestOptions & { refresh?: boolean }) {
     let endpoint = withUserId(`/wallet/token-balances?chain=${encodeURIComponent(chain)}`, options?.userId);
     if (options?.refresh) endpoint = `${endpoint}&refresh=true`;
     return requestWithAuth<AnyAsset[]>(baseUrl, token, endpoint);
   },
 
-  getTransactions(baseUrl: string, token: string | null | undefined, chain: string, limit: number = 50, options?: RequestOptions) {
-    const endpoint = withUserId(
+  getTransactions(baseUrl: string, token: string | null | undefined, chain: string, limit: number = 50, options?: WalletRequestOptions) {
+    let endpoint = withUserId(
       `/wallet/transactions?chain=${encodeURIComponent(chain)}&limit=${limit}`,
       options?.userId
     );
+    if (options?.refresh) endpoint = `${endpoint}&refresh=true`;
     return requestWithAuth<WalletTx[]>(baseUrl, token, endpoint);
   },
 
-  getTransactionsAny(baseUrl: string, token: string | null | undefined, limit: number = 100, options?: RequestOptions) {
-    const endpoint = withUserId(`/wallet/transactions-any?limit=${limit}`, options?.userId);
+  getTransactionsAny(baseUrl: string, token: string | null | undefined, limit: number = 100, options?: WalletRequestOptions) {
+    let endpoint = withUserId(`/wallet/transactions-any?limit=${limit}`, options?.userId);
+    if (options?.refresh) endpoint = `${endpoint}&refresh=true`;
     return requestWithAuth<WalletTx[]>(baseUrl, token, endpoint);
   },
 
@@ -173,7 +180,7 @@ export const walletApi = {
     });
   },
 
-  getPaymasterBalances(baseUrl: string, token: string | null | undefined, options?: RequestOptions) {
+  getPaymasterBalances(baseUrl: string, token: string | null | undefined, options?: WalletRequestOptions) {
     return requestWithAuth<ChainBalance[]>(
       baseUrl,
       token,

@@ -76,6 +76,34 @@ const normalizeEvmAddress = (value: string) => value.trim().toLowerCase();
 const isValidEvmAddress = (value: string) =>
   /^0x[a-f0-9]{40}$/.test(normalizeEvmAddress(value));
 
+const extractPrimaryEvmAddressFromUiPayload = (payload: any): string | null => {
+  const smartAddress = payload?.smartAccount?.address;
+  if (typeof smartAddress === 'string' && smartAddress.trim()) {
+    return smartAddress.trim();
+  }
+
+  const aux = payload?.auxiliary;
+  if (Array.isArray(aux)) {
+    const eth = aux.find(
+      (e: any) =>
+        e?.chain === 'ethereum' &&
+        typeof e?.address === 'string' &&
+        e.address.trim(),
+    );
+    if (eth?.address) return String(eth.address).trim();
+
+    const anyEvm = aux.find(
+      (e: any) =>
+        ['base', 'arbitrum', 'polygon', 'avalanche'].includes(e?.chain) &&
+        typeof e?.address === 'string' &&
+        e.address.trim(),
+    );
+    if (anyEvm?.address) return String(anyEvm.address).trim();
+  }
+
+  return null;
+};
+
 const NETWORK_LIST = [
   {
     title: 'GASLESS CHAINS / EIP-7702',
@@ -658,25 +686,21 @@ export default function App() {
 
   const loadWalletRuntimeData = async (refresh: boolean = false) => {
     try {
-      // Wallet reads should not hard-block on /health checks.
-      const baseUrl = getPreferredApiBaseUrl();
+      // Use the same resolved base URL as write operations (create/send),
+      // otherwise reads can hit a different backend and look "stuck".
+      const baseUrl = await resolveApiBaseUrl();
       const token = authToken;
       const userId = authUser?.id || (await getOrCreateFingerprint());
-      const [addresses, balances, assets, txAny, paymaster] = await Promise.all([
+      const [uiAddresses, balances, assets, txAny, paymaster] = await Promise.all([
         walletApi.getAddresses(baseUrl, token, { userId }),
         walletApi.getBalances(baseUrl, token, { userId, refresh }),
         walletApi.getAssetsAny(baseUrl, token, { userId, refresh }),
-        walletApi.getTransactionsAny(baseUrl, token, 100, { userId }),
+        walletApi.getTransactionsAny(baseUrl, token, 100, { userId, refresh } as any),
         walletApi.getPaymasterBalances(baseUrl, token, { userId }),
       ]);
-      setWalletAddresses(addresses);
-      const primaryAddress =
-        (addresses?.ethereum as string | undefined) ||
-        (addresses?.evm as string | undefined) ||
-        '';
-      if (primaryAddress) {
-        setWalletAddress(normalizeEvmAddress(primaryAddress));
-      }
+      setWalletAddresses(uiAddresses);
+      const primaryAddress = extractPrimaryEvmAddressFromUiPayload(uiAddresses);
+      if (primaryAddress) setWalletAddress(normalizeEvmAddress(primaryAddress));
       setChainBalances(balances);
       setAnyAssets(assets);
       setAnyTransactions(txAny);
@@ -688,12 +712,12 @@ export default function App() {
 
   const refreshSelectedChainData = async (refresh: boolean = false) => {
     try {
-      const baseUrl = getPreferredApiBaseUrl();
+      const baseUrl = await resolveApiBaseUrl();
       const token = authToken;
       const userId = authUser?.id || (await getOrCreateFingerprint());
       const [tokens, txs] = await Promise.all([
         walletApi.getTokenBalances(baseUrl, token, selectedChain, { userId, refresh }),
-        walletApi.getTransactions(baseUrl, token, selectedChain, 50, { userId }),
+        walletApi.getTransactions(baseUrl, token, selectedChain, 50, { userId, refresh } as any),
       ]);
       setChainTokenBalances(tokens);
       setChainTransactions(txs);
@@ -864,7 +888,10 @@ export default function App() {
       };
 
       // Attempt 1: deep link back to app.
-      const appRedirect = 'tempwallets://auth/callback';
+      // Use a runtime-correct redirect URI:
+      // - Expo Go: exp://.../--/auth/callback
+      // - Standalone/dev-client: tempwallets://auth/callback (from app.json scheme)
+      const appRedirect = ExpoLinking.createURL('auth/callback');
       let authPayload = await tryLoginWithRedirect(appRedirect, appRedirect);
 
       // Attempt 2: when backend falls back to website callback (shared backend),
@@ -1224,10 +1251,22 @@ export default function App() {
         const baseUrl = await resolveApiBaseUrl();
         const userId = await resolveWalletUserId();
         const token = authToken;
-        await walletApi.createOrImportSeed(baseUrl, token, {
+        const created = await walletApi.createOrImportSeed(baseUrl, token, {
           userId,
           mode: 'random',
         });
+
+        // Update UI immediately from the create response (prevents "looks stuck" bug).
+        if (created?.ethereum) {
+          setWalletAddress(normalizeEvmAddress(created.ethereum));
+        } else if (created?.addresses) {
+          const primary = extractPrimaryEvmAddressFromUiPayload(created.addresses);
+          if (primary) setWalletAddress(normalizeEvmAddress(primary));
+        }
+        if (created?.addresses) {
+          setWalletAddresses(created.addresses);
+        }
+
         await Promise.all([
           loadWalletRuntimeData(true),
           refreshSelectedChainData(true),
@@ -1397,7 +1436,7 @@ export default function App() {
             <Text style={styles.greeting}>{greeting}</Text>
             <Text style={styles.subGreeting}>
               {authUser
-                ? `Signed in with ${authUser.email || 'Google'}`
+                ? 'Signed in'
                 : isSigningIn
                   ? 'Opening Google Sign-In...'
                   : 'Sign in to sync your wallets'}

@@ -184,8 +184,14 @@ export class WalletController {
         dto.mnemonic,
       );
 
+      // Return fresh addresses immediately so mobile can update UI without extra round-trips.
+      const ui = await this.walletService.getUiWalletAddresses(finalUserId);
+      const internal = await this.walletService.getAddresses(finalUserId);
+
       return {
         ok: true,
+        ethereum: internal.ethereum ?? null,
+        addresses: ui,
       };
     } catch (error) {
       this.logger.error(
@@ -568,6 +574,7 @@ export class WalletController {
     @Query('userId') queryUserId?: string,
     @Query('chain') chain?: string,
     @Query('limit') limit?: string,
+    @Query('refresh') refresh?: string,
   ) {
     const finalUserId = userId || queryUserId;
     if (!finalUserId) {
@@ -591,6 +598,7 @@ export class WalletController {
         finalUserId,
         chain,
         limitNum,
+        refresh === 'true',
       );
 
       return transactions;
@@ -607,6 +615,7 @@ export class WalletController {
     @UserId() userId?: string,
     @Query('userId') queryUserId?: string,
     @Query('limit') limit?: string,
+    @Query('refresh') refresh?: string,
   ) {
     const finalUserId = userId || queryUserId;
     if (!finalUserId) {
@@ -626,6 +635,7 @@ export class WalletController {
       const transactions = await this.walletService.getTransactionsAny(
         finalUserId,
         limitNum,
+        refresh === 'true',
       );
       return transactions;
     } catch (error) {

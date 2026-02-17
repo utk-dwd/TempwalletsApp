@@ -163,17 +163,38 @@ export class WalletService {
     mnemonic?: string,
     saveHistory: boolean = true,
   ): Promise<void> {
-    // For authenticated users (non-temp IDs), save current wallet to history
     const isAuthenticatedUser = !userId.startsWith('temp-');
 
-    if (saveHistory && isAuthenticatedUser) {
-      try {
-        // Check if user has an existing seed to save
-        const hasSeed = await this.seedManager.hasSeed(userId);
-        if (hasSeed) {
-          const currentSeed = await this.seedManager.getSeed(userId);
-          await this.walletHistoryRepository.saveToHistory(userId, currentSeed);
+    // Capture current seed/address (if any) BEFORE overwriting.
+    let currentSeed: string | null = null;
+    let currentEthAddress: string | null = null;
+    try {
+      const hasSeed = await this.seedManager.hasSeed(userId);
+      if (hasSeed) {
+        currentSeed = await this.seedManager.getSeed(userId);
+        try {
+          const currentEthAccount = await this.nativeEoaFactory.createAccount(
+            currentSeed,
+            'ethereum',
+            0,
+          );
+          currentEthAddress = (await currentEthAccount.getAddress()) ?? null;
+        } catch (error) {
+          this.logger.warn(
+            `Failed to derive current Ethereum address for user ${userId}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          );
         }
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Failed to read current seed for user ${userId}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+    }
+
+    // For authenticated users (non-temp IDs), save current wallet to history
+    if (saveHistory && isAuthenticatedUser && currentSeed) {
+      try {
+        await this.walletHistoryRepository.saveToHistory(userId, currentSeed);
       } catch (error) {
         this.logger.warn(
           `Failed to save wallet history: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -185,7 +206,49 @@ export class WalletService {
     // Clear any cached addresses since a new seed means new addresses
     await this.addressManager.clearAddressCache(userId);
 
-    // Use the SeedManager for all seed operations
+    // For "random" mode, guarantee we actually get a NEW Ethereum address.
+    // This prevents UX bugs where Create New appears to do nothing.
+    if (mode === 'random') {
+      const maxAttempts = 10;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const seedPhrase = this.seedManager.createRandomSeed();
+
+        // If we can't derive/compare current address, just store and return.
+        if (!currentEthAddress) {
+          await this.seedManager.storeSeed(userId, seedPhrase);
+          return;
+        }
+
+        try {
+          const nextEthAccount = await this.nativeEoaFactory.createAccount(
+            seedPhrase,
+            'ethereum',
+            0,
+          );
+          const nextEthAddress = await nextEthAccount.getAddress();
+
+          if (
+            nextEthAddress &&
+            nextEthAddress.toLowerCase() !== currentEthAddress.toLowerCase()
+          ) {
+            await this.seedManager.storeSeed(userId, seedPhrase);
+            return;
+          }
+        } catch (error) {
+          this.logger.warn(
+            `Failed to validate newly generated wallet address (attempt ${attempt}/${maxAttempts}) for user ${userId}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+          );
+          // Keep trying
+        }
+      }
+
+      throw new Error(
+        'Failed to generate a new wallet address after multiple attempts',
+      );
+    }
+
+    // Use the SeedManager for mnemonic imports.
     return this.seedManager.createOrImportSeed(userId, mode, mnemonic);
   }
 
@@ -851,6 +914,7 @@ export class WalletService {
   async getTransactionsAny(
     userId: string,
     limit: number = 100,
+    forceRefresh: boolean = false,
   ): Promise<
     Array<{
       txHash: string;
@@ -874,6 +938,12 @@ export class WalletService {
     const targetAddresses = [addresses.ethereum, addresses.solana].filter(
       Boolean,
     );
+
+    if (forceRefresh) {
+      // Clear Zerion caches so subsequent calls reflect new tx quickly.
+      if (addresses.ethereum) this.zerionService.invalidateCache(addresses.ethereum, 'ethereum');
+      if (addresses.solana) this.zerionService.invalidateCache(addresses.solana, 'solana');
+    }
 
     // Polkadot EVM chains use the same EOA address as ethereum
     const polkadotEvmAddress = addresses.ethereum;
@@ -3192,6 +3262,7 @@ export class WalletService {
     userId: string,
     chain: string,
     limit: number = 50,
+    forceRefresh: boolean = false,
   ): Promise<
     Array<{
       txHash: string;
@@ -3227,6 +3298,11 @@ export class WalletService {
       if (!address) {
         this.logger.warn(`No address found for chain ${chain}`);
         return [];
+      }
+
+      if (forceRefresh) {
+        // Clear Zerion caches so UI refresh reflects recent activity.
+        this.zerionService.invalidateCache(address, chain);
       }
 
       // Get transactions from Zerion
