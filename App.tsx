@@ -21,6 +21,7 @@ import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import * as ExpoLinking from 'expo-linking';
+import * as AuthSession from 'expo-auth-session';
 import * as SecureStore from 'expo-secure-store';
 import * as WebBrowser from 'expo-web-browser';
 import * as Application from 'expo-application';
@@ -45,9 +46,18 @@ import {
   FINGERPRINT_KEY,
   API_URL,
   MOBILE_API_URL,
+  TEMPWALLETS_BACKEND_URL,
   WC_PROJECT_ID,
 } from './src/config/auth';
 import { decodeUserParam, shortAddress } from './src/utils/auth';
+import {
+  extractPrimaryEvmAddressFromUiPayload,
+  formatUnits,
+  hexToRgba,
+  isValidEvmAddress,
+  normalizeEvmAddress,
+} from './src/utils/wallet';
+import { getRequestedEip155ChainIds } from './src/utils/walletConnect';
 import { AboutScreen } from './src/screens/AboutScreen';
 import { userApi } from './src/services/userApi';
 import {
@@ -57,346 +67,33 @@ import {
   WalletTx,
   ChainBalance,
 } from './src/services/walletApi';
+import {
+  startWalletAddressesStream,
+  startWalletBalancesStream,
+  type WalletBalancesStreamEvent,
+} from './src/services/walletStreams';
+import {
+  ABOUT_BLOGS,
+  ABOUT_SERVICES,
+  ABOUT_TEAM,
+  ACTIONS,
+  DEFAULT_VISIBLE_NETWORK_IDS,
+  NETWORK_BASE_ASSET_BY_ID,
+  NETWORK_ITEM_BY_ID,
+  NETWORK_LIST,
+  TESTIMONIALS,
+  type WalletNetworkItem,
+} from './src/constants/walletUi';
+import { WalletOverviewSection } from './src/components/wallet/WalletOverviewSection';
+import { WalletTabsSection } from './src/components/wallet/WalletTabsSection';
+import { SendModal } from './src/components/modals/SendModal';
+import { NetworkListModal } from './src/components/modals/NetworkListModal';
+import { WalletHistoryModal } from './src/components/modals/WalletHistoryModal';
 
 const INITIAL_ADDRESS = '0x52e87d9c5f3a1d2b9a7f5c8e3a1b9c0d8e3a8e3ac';
 const { width } = Dimensions.get('window');
 
 WebBrowser.maybeCompleteAuthSession();
-
-const hexToRgba = (hex: string, alpha: number) => {
-  const cleaned = hex.replace('#', '');
-  const bigint = parseInt(cleaned, 16);
-  const r = (bigint >> 16) & 255;
-  const g = (bigint >> 8) & 255;
-  const b = bigint & 255;
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-};
-
-const normalizeEvmAddress = (value: string) => value.trim().toLowerCase();
-const isValidEvmAddress = (value: string) =>
-  /^0x[a-f0-9]{40}$/.test(normalizeEvmAddress(value));
-
-const formatUnits = (value: string, decimals: number, maxFractionDigits = 6) => {
-  try {
-    const v = BigInt((value || '0').trim());
-    const d = Math.max(0, Math.min(36, decimals || 0));
-    const base = 10n ** BigInt(d);
-    const whole = v / base;
-    const frac = v % base;
-
-    if (frac === 0n || maxFractionDigits === 0) return whole.toString();
-
-    let fracStr = frac.toString().padStart(d, '0');
-    // Trim trailing zeros, then limit fraction digits
-    fracStr = fracStr.replace(/0+$/, '');
-    if (fracStr.length > maxFractionDigits) {
-      fracStr = fracStr.slice(0, maxFractionDigits).replace(/0+$/, '');
-    }
-    return fracStr ? `${whole.toString()}.${fracStr}` : whole.toString();
-  } catch {
-    return '0';
-  }
-};
-
-const extractPrimaryEvmAddressFromUiPayload = (payload: any): string | null => {
-  const smartAddress = payload?.smartAccount?.address;
-  if (typeof smartAddress === 'string' && smartAddress.trim()) {
-    return smartAddress.trim();
-  }
-
-  const aux = payload?.auxiliary;
-  if (Array.isArray(aux)) {
-    const eth = aux.find(
-      (e: any) =>
-        e?.chain === 'ethereum' &&
-        typeof e?.address === 'string' &&
-        e.address.trim(),
-    );
-    if (eth?.address) return String(eth.address).trim();
-
-    const anyEvm = aux.find(
-      (e: any) =>
-        ['base', 'arbitrum', 'polygon', 'avalanche'].includes(e?.chain) &&
-        typeof e?.address === 'string' &&
-        e.address.trim(),
-    );
-    if (anyEvm?.address) return String(anyEvm.address).trim();
-  }
-
-  return null;
-};
-
-const NETWORK_LIST = [
-  {
-    title: 'GASLESS CHAINS / EIP-7702',
-    items: [
-      {
-        id: 'ethereumErc4337',
-        symbol: 'ETH',
-        name: 'Ethereum',
-        badge: '7702',
-        color: '#627EEA',
-        logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/info/logo.png',
-        dot: true,
-      },
-      {
-        id: 'baseErc4337',
-        symbol: 'BASE',
-        name: 'Base',
-        badge: '7702',
-        color: '#0052FF',
-        logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/info/logo.png',
-      },
-      {
-        id: 'polygonErc4337',
-        symbol: 'MATIC',
-        name: 'Polygon',
-        badge: '7702',
-        color: '#8247E5',
-        logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/polygon/info/logo.png',
-      },
-      {
-        id: 'avalancheErc4337',
-        symbol: 'AVAX',
-        name: 'Avalanche',
-        badge: '7702',
-        color: '#E84142',
-        logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/avalanchec/info/logo.png',
-      },
-      {
-        id: 'arbitrumErc4337',
-        symbol: 'ARB',
-        name: 'Arbitrum',
-        badge: '7702',
-        color: '#28A0F0',
-        logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/arbitrum/info/logo.png',
-      },
-    ],
-  },
-  {
-    title: 'EVM EOA WALLETS',
-    items: [
-      {
-        id: 'ethereumEoa',
-        symbol: 'ETH',
-        name: 'Ethereum',
-        badge: 'EOA',
-        color: '#627EEA',
-        logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/info/logo.png',
-      },
-      {
-        id: 'baseEoa',
-        symbol: 'BASE',
-        name: 'Base',
-        badge: 'EOA',
-        color: '#0052FF',
-        logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/info/logo.png',
-      },
-      {
-        id: 'arbitrumEoa',
-        symbol: 'ARB',
-        name: 'Arbitrum',
-        badge: 'EOA',
-        color: '#28A0F0',
-        logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/arbitrum/info/logo.png',
-      },
-      {
-        id: 'polygonEoa',
-        symbol: 'MATIC',
-        name: 'Polygon',
-        badge: 'EOA',
-        color: '#8247E5',
-        logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/polygon/info/logo.png',
-      },
-      {
-        id: 'avalancheEoa',
-        symbol: 'AVAX',
-        name: 'Avalanche',
-        badge: 'EOA',
-        color: '#E84142',
-        logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/avalanchec/info/logo.png',
-      },
-    ],
-  },
-  {
-    title: 'COMPATIBLE LIGHTNING NODE WALLETS',
-    items: [
-      {
-        id: 'lnEthereum',
-        symbol: 'ETH',
-        name: 'Ethereum',
-        badge: '7702',
-        color: '#627EEA',
-        logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/info/logo.png',
-        dot: true,
-      },
-      {
-        id: 'lnBase',
-        symbol: 'BASE',
-        name: 'Base',
-        badge: '7702',
-        color: '#0052FF',
-        logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/info/logo.png',
-      },
-      {
-        id: 'lnArbitrum',
-        symbol: 'ARB',
-        name: 'Arbitrum',
-        badge: '7702',
-        color: '#28A0F0',
-        logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/arbitrum/info/logo.png',
-      },
-    ],
-  },
-];
-
-const DEFAULT_VISIBLE_NETWORK_IDS = [
-  'ethereumErc4337',
-  'baseErc4337',
-  'arbitrumErc4337',
-  'polygonErc4337',
-];
-
-const FLAT_NETWORK_ITEMS = NETWORK_LIST.flatMap((group) => group.items);
-const NETWORK_ITEM_BY_ID = Object.fromEntries(
-  FLAT_NETWORK_ITEMS.map((item) => [item.id, item])
-) as Record<string, (typeof FLAT_NETWORK_ITEMS)[number]>;
-const NETWORK_BASE_ASSET_BY_ID: Record<string, { amount: string; usdValue: string; changePct: string }> = {
-  ethereumErc4337: { amount: '0.00 ETH', usdValue: '$0.00', changePct: '+0.00%' },
-  baseErc4337: { amount: '0.00 ETH', usdValue: '$0.00', changePct: '+0.00%' },
-  arbitrumErc4337: { amount: '0.00 ETH', usdValue: '$0.00', changePct: '+0.00%' },
-  polygonErc4337: { amount: '0.00 MATIC', usdValue: '$0.00', changePct: '+0.00%' },
-  avalancheErc4337: { amount: '0.00 AVAX', usdValue: '$0.00', changePct: '+0.00%' },
-  ethereumEoa: { amount: '0.00 ETH', usdValue: '$0.00', changePct: '+0.00%' },
-  baseEoa: { amount: '0.00 ETH', usdValue: '$0.00', changePct: '+0.00%' },
-  arbitrumEoa: { amount: '0.00 ETH', usdValue: '$0.00', changePct: '+0.00%' },
-  polygonEoa: { amount: '0.00 MATIC', usdValue: '$0.00', changePct: '+0.00%' },
-  avalancheEoa: { amount: '0.00 AVAX', usdValue: '$0.00', changePct: '+0.00%' },
-  lnEthereum: { amount: '0.00 ETH', usdValue: '$0.00', changePct: '+0.00%' },
-  lnBase: { amount: '0.00 ETH', usdValue: '$0.00', changePct: '+0.00%' },
-  lnArbitrum: { amount: '0.00 ETH', usdValue: '$0.00', changePct: '+0.00%' },
-};
-
-const ACTIONS = [
-  { id: 'connect', label: 'Connect', icon: 'link-variant' as const },
-  { id: 'send', label: 'Send', icon: 'send' as const },
-  { id: 'copy', label: 'Copy', icon: 'content-copy' as const },
-  { id: 'history', label: 'History', icon: 'history' as const },
-  { id: 'create', label: 'Create New', icon: 'plus-circle-outline' as const },
-];
-
-const ABOUT_SERVICES = [
-  {
-    id: 'lightning',
-    icon: require('./assets/Risk.png'),
-    title: 'Lightning Network Channels',
-    description:
-      'Open instant low-fee Lightning channels in TempWallet for fast, scalable, cross-chain crypto payments.',
-  },
-  {
-    id: 'gasless',
-    icon: require('./assets/Wallet.png'),
-    title: 'Gas-less Burner Wallets',
-    description:
-      'Receive tokens instantly without gas fees in burner wallets for secure, private transactions.',
-  },
-  {
-    id: 'telegram',
-    icon: require('./assets/Write-Cheque.png'),
-    title: 'Secure Telegram Notifications',
-    description:
-      'Get private, real-time Telegram alerts for all wallet activities to stay informed and protected.',
-  },
-];
-
-const ABOUT_TEAM = [
-  {
-    id: 'rohit',
-    name: 'Rohit',
-    role: 'Founder',
-    image: require('./assets/Rohit Profile Picture.png'),
-    twitter: 'https://x.com/cryptorohittt',
-    telegram: 'https://t.me/cryptorohittt',
-  },
-  {
-    id: 'karsh',
-    name: 'Karsh',
-    role: 'Founding Developer',
-    image: require('./assets/Utkarsh Profile Picture.png'),
-    twitter: 'https://x.com/karshingdev',
-    telegram: 'https://t.me/karshingdev',
-  },
-  {
-    id: 'rahul',
-    name: 'Rahul',
-    role: 'Business Development',
-    image: require('./assets/Rahul Profile Picture.png'),
-    twitter: 'https://x.com/rahulpandey187',
-    telegram: 'https://t.me/rahulpandey187',
-  },
-  {
-    id: 'lavina',
-    name: 'Lavina',
-    role: 'PR & Communications',
-    image: require('./assets/Lavina Profile Picture.png'),
-    twitter: 'https://x.com/lavinafand_21',
-    telegram: 'https://t.me/lavinafand_21',
-  },
-];
-
-const ABOUT_BLOGS = [
-  {
-    id: 'blog1',
-    image: require('./assets/3D Black Chrome Shape (16).png'),
-    date: 'March 3, 2025',
-    title: 'How Tempwallets is Shaping a Trustless Economy',
-    description: "Blockchain is no longer just a buzzword. It's the backbone of a new era of digital innovation. . .",
-    tags: ['Smart', 'Contract', 'Creation'],
-  },
-  {
-    id: 'blog2',
-    image: require('./assets/3D Black Chrome Shape (17).png'),
-    date: 'March 10, 2025',
-    title: 'Decentralized Finance: The Future of Banking',
-    description:
-      'Traditional banking systems are being revolutionized by DeFi protocols that offer transparency and accessibility. . .',
-    tags: ['Finance', 'Banking', 'Revolution'],
-  },
-  {
-    id: 'blog3',
-    image: require('./assets/3D Black Chrome Shape (21).png'),
-    date: 'March 17, 2025',
-    title: "Web3 Integration: Building Tomorrow's Internet",
-    description:
-      'The next generation of the internet is here, powered by decentralized technologies and user ownership. . .',
-    tags: ['Web3', 'Internet', 'Future'],
-  },
-];
-
-const TESTIMONIALS = [
-  {
-    id: 't1',
-    name: 'Alex C.',
-    handle: '@alexcrypto',
-    text: 'TempWallets is a game changer for quick degen plays. Love the gasless features!',
-  },
-  {
-    id: 't2',
-    name: 'Sarah J.',
-    handle: '@sarahweb3',
-    text: 'Finally a wallet that respects my privacy without the hassle. The UI is slick too.',
-  },
-];
-
-const getRequestedEip155ChainIds = (proposal: WalletConnectProposalEvent) => {
-  const required = proposal.params.requiredNamespaces?.eip155?.chains || [];
-  const optional = proposal.params.optionalNamespaces?.eip155?.chains || [];
-  const unique = [...new Set([...required, ...optional])];
-  return unique
-    .filter((item) => item.startsWith('eip155:'))
-    .map((item) => Number(item.split(':')[1]))
-    .filter((id) => Number.isFinite(id));
-};
 
 export default function App() {
   const [activeScreen, setActiveScreen] = useState<ScreenKey>('wallet');
@@ -425,6 +122,9 @@ export default function App() {
   const [isWcPairing, setIsWcPairing] = useState(false);
   const [wcError, setWcError] = useState<string | null>(null);
   const [wcSessions, setWcSessions] = useState<WalletConnectSession[]>([]);
+  const [backendWcSessions, setBackendWcSessions] = useState<any[]>([]);
+  const [pendingWcProposals, setPendingWcProposals] = useState<any[]>([]);
+  const [pendingWcRequestsByTopic, setPendingWcRequestsByTopic] = useState<Record<string, any[]>>({});
   const [showScanner, setShowScanner] = useState(false);
   const [sendAmount, setSendAmount] = useState('');
   const [recipientAddress, setRecipientAddress] = useState('');
@@ -439,6 +139,7 @@ export default function App() {
   const [chainTransactions, setChainTransactions] = useState<WalletTx[]>([]);
   const [anyTransactions, setAnyTransactions] = useState<WalletTx[]>([]);
   const [paymasterBalances, setPaymasterBalances] = useState<ChainBalance[]>([]);
+  const [walletUserId, setWalletUserId] = useState<string | null>(null);
   const [showNetworkList, setShowNetworkList] = useState(false);
   const [selectedNetworkId, setSelectedNetworkId] = useState('ethereumErc4337');
   const [visibleNetworkIds, setVisibleNetworkIds] = useState<string[]>(DEFAULT_VISIBLE_NETWORK_IDS);
@@ -457,11 +158,21 @@ export default function App() {
     return 'Hello, User!';
   }, [authUser?.name]);
 
-  const visibleNetworks = useMemo(
+  const visibleNetworks = useMemo<
+    Array<{
+      id: string;
+      label: string;
+      badge: string;
+      subtitle: string;
+      color: string;
+      logo: string;
+      dot?: boolean;
+    }>
+  >(
     () =>
       visibleNetworkIds
         .map((id) => NETWORK_ITEM_BY_ID[id])
-        .filter(Boolean)
+        .filter((item): item is WalletNetworkItem => Boolean(item))
         .map((item) => ({
           id: item.id,
           label: item.name,
@@ -474,9 +185,11 @@ export default function App() {
     [visibleNetworkIds]
   );
 
-  const selectedNetwork = useMemo(
-    () => NETWORK_ITEM_BY_ID[selectedNetworkId] || NETWORK_ITEM_BY_ID.ethereumErc4337,
-    [selectedNetworkId]
+  const selectedNetwork = useMemo<WalletNetworkItem>(
+    () =>
+      (NETWORK_ITEM_BY_ID[selectedNetworkId] ||
+        NETWORK_ITEM_BY_ID.ethereumErc4337) as WalletNetworkItem,
+    [selectedNetworkId],
   );
   const selectedChain = useMemo(() => {
     const name = selectedNetwork.name.toLowerCase();
@@ -607,6 +320,82 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const id = authUser?.id || (await getOrCreateFingerprint());
+        if (!cancelled) setWalletUserId(id);
+      } catch {
+        if (!cancelled) setWalletUserId(null);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser?.id]);
+
+  useEffect(() => {
+    if (!walletUserId) return;
+    let stopAddresses: null | (() => void) = null;
+    let stopBalances: null | (() => void) = null;
+    let cancelled = false;
+
+    const upsertChainBalance = (chain: string, balance: string) => {
+      setChainBalances((prev) => {
+        const key = String(chain || '').toLowerCase();
+        const next = prev.slice();
+        const idx = next.findIndex((b) => String(b.chain || '').toLowerCase() === key);
+        if (idx >= 0) next[idx] = { ...next[idx], chain, balance };
+        else next.push({ chain, balance });
+        return next;
+      });
+    };
+
+    const run = async () => {
+      try {
+        const baseUrl = await resolveApiBaseUrl();
+        if (cancelled) return;
+        stopAddresses = startWalletAddressesStream(
+          { baseUrl, token: authToken, userId: walletUserId },
+          (payload) => {
+            setWalletAddresses(payload);
+            const primary = extractPrimaryEvmAddressFromUiPayload(payload);
+            if (primary) setWalletAddress(normalizeEvmAddress(primary));
+          },
+        );
+        stopBalances = startWalletBalancesStream(
+          { baseUrl, token: authToken, userId: walletUserId },
+          (payload: WalletBalancesStreamEvent) => {
+            const chain = String(payload?.chain || '').trim();
+            if (!chain) return;
+            if (typeof payload?.nativeBalance === 'string') {
+              upsertChainBalance(chain, payload.nativeBalance);
+            }
+            if (chain === selectedChain && Array.isArray(payload?.tokens)) {
+              // Stream token list is backend-defined; treat as AnyAsset[] when possible.
+              setChainTokenBalances(payload.tokens as any);
+            }
+          },
+        );
+      } catch {
+        // Streaming is best-effort; ignore failures.
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+      try {
+        stopAddresses?.();
+      } catch {}
+      try {
+        stopBalances?.();
+      } catch {}
+    };
+  }, [walletUserId, authToken, selectedChain]);
+
+  useEffect(() => {
     loadWalletRuntimeData(false);
     if (authToken) {
       loadWalletHistory();
@@ -701,23 +490,34 @@ export default function App() {
   };
 
   const isBackendReachable = async (baseUrl: string) => {
-    try {
-      const healthUrl = new URL('/health', baseUrl).toString();
-      const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('timeout')), 3000)
-      );
-      const response = await Promise.race([fetch(healthUrl), timeout]);
-      return (response as Response).ok;
-    } catch {
-      return false;
+    const probeEndpoints = [
+      '/health',
+      '/wallet/addresses?userId=temp-mobile-probe',
+      '/auth/google',
+    ];
+    for (const endpoint of probeEndpoints) {
+      try {
+        const probeUrl = new URL(endpoint, baseUrl).toString();
+        const timeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('timeout')), 3000)
+        );
+        const response = await Promise.race([fetch(probeUrl), timeout]);
+        // Treat any non-5xx response as "backend reachable" for this probe.
+        if ((response as Response).status < 500) {
+          return true;
+        }
+      } catch {
+        // Continue probing other known endpoints.
+      }
     }
+    return false;
   };
 
   const getPreferredApiBaseUrl = () => MOBILE_API_URL || API_URL;
 
   const resolveGoogleAuthBaseUrl = async () => {
     const candidates = [MOBILE_API_URL, API_URL].filter(
-      (url, idx, arr) => arr.indexOf(url) === idx
+      (url, idx, arr) => Boolean(url) && arr.indexOf(url) === idx
     );
     for (const candidate of candidates) {
       const reachable = await isBackendReachable(candidate);
@@ -768,8 +568,13 @@ export default function App() {
       const primaryAddress = extractPrimaryEvmAddressFromUiPayload(uiAddresses);
       if (primaryAddress) setWalletAddress(normalizeEvmAddress(primaryAddress));
 
+      const balancesPromise = refresh
+        ? walletApi
+            .refreshBalances(baseUrl, token, { userId })
+            .then((r) => r.balances || [])
+        : walletApi.getBalances(baseUrl, token, { userId, refresh });
       const [balancesRes, assetsRes, paymasterRes] = await Promise.allSettled([
-        walletApi.getBalances(baseUrl, token, { userId, refresh }),
+        balancesPromise,
         walletApi.getAssetsAny(baseUrl, token, { userId, refresh }),
         walletApi.getPaymasterBalances(baseUrl, token, { userId }),
       ]);
@@ -813,7 +618,7 @@ export default function App() {
       Alert.alert(
         'Chain API error',
         msg.includes('Backend is unreachable')
-          ? `Backend not running.\n\nStart your backend on ${API_URL} or set EXPO_PUBLIC_MOBILE_API_URL to your Railway backend.`
+          ? `Backend not reachable.\n\nSet EXPO_PUBLIC_MOBILE_API_URL or EXPO_PUBLIC_API_URL to your Tempwallet backend (default: ${TEMPWALLETS_BACKEND_URL}).`
           : msg
       );
     }
@@ -946,11 +751,11 @@ export default function App() {
       const fingerprint = await getOrCreateFingerprint();
       const authBaseUrl = await resolveGoogleAuthBaseUrl();
       const tryLoginWithRedirect = async (redirectUri: string, mobileRedirectUrl: string) => {
-        const state = JSON.stringify({ fingerprint, mobileRedirectUrl });
-        const authUrl = new URL(
-          `/auth/google?state=${encodeURIComponent(state)}`,
-          authBaseUrl
-        ).toString();
+        // Backend contract supports `returnUrl`; keep `mobileRedirectUrl` for backward compatibility.
+        const state = JSON.stringify({ fingerprint, returnUrl: mobileRedirectUrl, mobileRedirectUrl });
+        const authUrlObj = new URL('/auth/google', authBaseUrl);
+        authUrlObj.searchParams.set('state', state);
+        const authUrl = authUrlObj.toString();
 
         const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUri);
         if (result.type !== 'success' || !result.url) {
@@ -974,15 +779,29 @@ export default function App() {
         return { token, parsedUser };
       };
 
-      // Attempt 1: deep link back to app.
-      // Use a runtime-correct redirect URI:
-      // - Expo Go: exp://.../--/auth/callback
-      // - Standalone/dev-client: tempwallets://auth/callback (from app.json scheme)
-      const appRedirect = ExpoLinking.createURL('auth/callback');
-      let authPayload = await tryLoginWithRedirect(appRedirect, appRedirect);
+      // Attempt 1: Expo proxy redirect (https), often accepted by stricter backend allow-lists.
+      // This is especially useful in Expo Go where custom-scheme deep links are not always allowed.
+      let proxyRedirect = '';
+      try {
+        // In Expo Go this usually resolves to https://auth.expo.io/... and works with strict backend allow-lists.
+        proxyRedirect = AuthSession.getRedirectUrl('auth/callback');
+      } catch {
+        proxyRedirect = '';
+      }
+      let authPayload =
+        proxyRedirect && proxyRedirect.startsWith('https://')
+          ? await tryLoginWithRedirect(proxyRedirect, proxyRedirect)
+          : null;
 
-      // Attempt 2: when backend falls back to website callback (shared backend),
-      // still complete auth in-app by matching website callback as return URL.
+      // Attempt 2: deep link back to app.
+      // - Expo Go: exp://.../--/auth/callback
+      // - Standalone/dev-client: tempwallets://auth/callback
+      if (!authPayload) {
+        const appRedirect = ExpoLinking.createURL('auth/callback');
+        authPayload = await tryLoginWithRedirect(appRedirect, appRedirect);
+      }
+
+      // Attempt 3: website callback fallback for shared backend setups.
       if (!authPayload) {
         const webCallback = 'https://www.tempwallets.com/auth/callback';
         authPayload = await tryLoginWithRedirect(webCallback, webCallback);
@@ -1041,12 +860,64 @@ export default function App() {
 
   const resolveWalletUserId = async () => authUser?.id || getOrCreateFingerprint();
 
+  useEffect(() => {
+    if (!showConnectModal) return;
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const userId = await resolveWalletUserId();
+        const qs = `?userId=${encodeURIComponent(userId)}`;
+        const sessionsRes = await wcApiRequest<{ sessions: any[] }>(`/walletconnect/sessions${qs}`);
+        if (cancelled) return;
+        setBackendWcSessions(Array.isArray((sessionsRes as any)?.sessions) ? (sessionsRes as any).sessions : []);
+
+        const proposalsRes = await wcApiRequest<{ proposals: any[] }>(
+          `/walletconnect/proposals/pending${qs}`,
+        );
+        if (cancelled) return;
+        setPendingWcProposals(
+          Array.isArray((proposalsRes as any)?.proposals) ? (proposalsRes as any).proposals : [],
+        );
+
+        const topics = (Array.isArray((sessionsRes as any)?.sessions) ? (sessionsRes as any).sessions : [])
+          .map((s: any) => String(s?.topic || '').trim())
+          .filter(Boolean)
+          .slice(0, 3);
+
+        const requestsMap: Record<string, any[]> = {};
+        for (const topic of topics) {
+          try {
+            const reqRes = await wcApiRequest<{ requests: any[] }>(
+              `/walletconnect/sessions/${encodeURIComponent(topic)}/requests/pending${qs}`,
+            );
+            requestsMap[topic] = Array.isArray((reqRes as any)?.requests)
+              ? (reqRes as any).requests
+              : [];
+          } catch {
+            requestsMap[topic] = [];
+          }
+        }
+        if (!cancelled) setPendingWcRequestsByTopic(requestsMap);
+      } catch {
+        if (!cancelled) {
+          setBackendWcSessions([]);
+          setPendingWcProposals([]);
+          setPendingWcRequestsByTopic({});
+        }
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [showConnectModal, authUser?.id, authToken]);
+
   const wcApiRequest = async <T,>(
     endpoint: string,
     init?: RequestInit
   ): Promise<T> => {
     const baseUrl = await resolveApiBaseUrl();
-    const response = await fetch(`${baseUrl}${endpoint}`, {
+    const response = await fetch(new URL(endpoint, baseUrl).toString(), {
       ...init,
       headers: {
         'Content-Type': 'application/json',
@@ -1055,8 +926,16 @@ export default function App() {
       },
     });
     if (!response.ok) {
-      const text = await response.text();
-      throw new Error(text || `WalletConnect API failed (${response.status})`);
+      const raw = await response.text();
+      try {
+        const parsed = raw ? JSON.parse(raw) : null;
+        const msg = Array.isArray(parsed?.message)
+          ? parsed.message.join(', ')
+          : parsed?.message || raw;
+        throw new Error(msg || `WalletConnect API failed (${response.status})`);
+      } catch {
+        throw new Error(raw || `WalletConnect API failed (${response.status})`);
+      }
     }
     return response.json() as Promise<T>;
   };
@@ -1491,396 +1370,80 @@ export default function App() {
         <AboutScreen onBack={() => setActiveScreen('wallet')} />
       ) : (
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        <View style={styles.upperBar}>
-          <View style={styles.upperBarSide}>
-            <Pressable style={styles.iconButton} onPress={handleAuthPress}>
-              <Ionicons
-                name={authUser ? 'log-out-outline' : isSigningIn ? 'time-outline' : 'log-in-outline'}
-                size={18}
-                color="#fff"
-              />
-            </Pressable>
-          </View>
-          <Pressable style={styles.upperBarCenter} onPress={openProfileModal}>
-            <Text style={styles.greeting}>{greeting}</Text>
-            <Text style={styles.subGreeting}>
-              {authUser
-                ? 'Signed in'
-                : isSigningIn
-                  ? 'Opening Google Sign-In...'
-                  : 'Sign in to sync your wallets'}
-            </Text>
-          </Pressable>
-          <View style={styles.upperBarSideRight}>
-            <Pressable style={styles.iconButton} onPress={() => setActiveScreen('about')}>
-              <Ionicons name="home-outline" size={18} color="#fff" />
-            </Pressable>
-          </View>
-        </View>
+        <WalletOverviewSection
+          styles={styles}
+          greeting={greeting}
+          signedText={
+            authUser
+              ? 'Signed in'
+              : isSigningIn
+                ? 'Opening Google Sign-In...'
+                : 'Sign in to sync your wallets'
+          }
+          walletAddressShort={shortAddress(walletAddress)}
+          copied={copied}
+          actions={ACTIONS as any}
+          visibleNetworks={visibleNetworks}
+          selectedNetworkId={selectedNetworkId}
+          spinInterpolate={spinInterpolate}
+          isCreating={isCreating}
+          walletBusy={walletBusy}
+          authIconName={authUser ? 'log-out-outline' : isSigningIn ? 'time-outline' : 'log-in-outline'}
+          onAuthPress={handleAuthPress}
+          onOpenProfile={openProfileModal}
+          onOpenAbout={() => setActiveScreen('about')}
+          onActionPress={handleAction}
+          onOpenNetworkList={() => setShowNetworkList(true)}
+          onSelectNetwork={applySelectedNetwork}
+          onRefresh={handleWalletRefresh}
+          hexToRgba={hexToRgba}
+        />
 
-        <View style={styles.walletCard}>
-          <View style={styles.walletCardHeader}>
-            <Text style={styles.walletLabel}>Ethereum Wallet</Text>
-            <View style={styles.walletBadge}>
-              <Text style={styles.walletBadgeText}>GasLess / EIP-7702</Text>
-            </View>
-            <Ionicons name="information-circle-outline" size={12} color="#9ca3af" />
-          </View>
-          <Text style={styles.walletAddress}>{shortAddress(walletAddress)}</Text>
-        </View>
-
-        <View style={styles.actionsCard}>
-          {ACTIONS.map((action) => (
-            <Pressable
-              key={action.id}
-              style={({ pressed }) => [
-                styles.actionButton,
-                pressed && { opacity: 0.7 }
-              ]}
-              onPress={() => handleAction(action.id)}
-            >
-              <View
-                style={[
-                  styles.actionIconContainer,
-                  action.id === 'connect' && styles.actionIconContainerActive,
-                  action.id === 'copy' && copied && styles.actionIconCopiedActive,
-                ]}
-              >
-                {action.id === 'connect' ? (
-                  <Ionicons name="qr-code-outline" size={18} color="#fff" />
-                ) : action.id === 'send' ? (
-                  <Ionicons name="paper-plane-outline" size={18} color="#fff" />
-                ) : action.id === 'copy' ? (
-                  <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={18} color="#fff" />
-                ) : action.id === 'history' ? (
-                  <Ionicons name="time-outline" size={18} color="#fff" />
-                ) : action.id === 'create' ? (
-                  <Animated.View style={isCreating ? { transform: [{ rotate: spinInterpolate }] } : undefined}>
-                    <Ionicons name="refresh" size={18} color="#fff" />
-                  </Animated.View>
-                ) : (
-                  <MaterialCommunityIcons name={action.icon} size={18} color="#fff" />
-                )}
-              </View>
-              <Text
-                style={[
-                  styles.actionLabel,
-                  action.id === 'history' && styles.actionLabelMuted,
-                  action.id === 'copy' && copied && styles.actionLabelCopied,
-                ]}
-              >
-                {action.id === 'copy' && copied ? 'Copied!' : action.label}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <View style={styles.networksCard}>
-          <View style={styles.networksHeader}>
-            <Text style={styles.sectionTitle}>More Networks</Text>
-            <Pressable onPress={() => setShowNetworkList(true)}>
-              <Text style={styles.seeList}>See List</Text>
-            </Pressable>
-          </View>
-          <View style={styles.networksGrid}>
-            {visibleNetworks.map((network) => (
-              <Pressable
-                key={network.id}
-                style={({ pressed }) => [styles.networkItem, pressed && { opacity: 0.85 }]}
-                onPress={() => applySelectedNetwork(network.id)}
-              >
-                <View style={styles.networkIconWrap}>
-                  <View
-                    style={[
-                      styles.networkIcon,
-                      network.color && { backgroundColor: hexToRgba(network.color, 0.2) },
-                      selectedNetworkId === network.id && styles.networkIconActive,
-                    ]}
-                  >
-                    <Image source={{ uri: network.logo }} style={styles.networkLogo} />
-                  </View>
-                  {network.dot && <View style={styles.networkDot} />}
-                </View>
-                <Text
-                  style={[
-                    styles.networkLabel,
-                    selectedNetworkId === network.id && styles.networkLabelActive,
-                  ]}
-                >
-                  {network.label}
-                </Text>
-                {network.badge ? (
-                  <View style={styles.networkBadge}>
-                    <Text style={styles.networkBadgeText}>{network.badge}</Text>
-                  </View>
-                ) : null}
-                {network.subtitle ? (
-                  <Text style={styles.networkSubtitle}>{network.subtitle}</Text>
-                ) : null}
-              </Pressable>
-            ))}
-          </View>
-        </View>
-
-        <View style={styles.balanceCard}>
-          <View style={styles.tabHeader}>
-            <View style={styles.topDivider} />
-            {(['balance', 'transactions', 'lightning'] as TabKey[]).map((tab) => (
-              <Pressable
-                key={tab}
-                onPress={() => setActiveTab(tab)}
-                style={[styles.tabButton, activeTab === tab && styles.tabButtonActive]}
-              >
-                <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>
-                  {tab === 'balance' ? 'Balance' : tab === 'transactions' ? 'Transactions' : 'Lightning Nodes'}
-                </Text>
-              </Pressable>
-            ))}
-            <Pressable style={styles.refreshButton} onPress={handleWalletRefresh} disabled={walletBusy}>
-              {walletBusy ? (
-                <ActivityIndicator size="small" color="#6b7280" />
-              ) : (
-                <Ionicons name="refresh" size={16} color="#6b7280" />
-              )}
-            </Pressable>
-          </View>
-
-          <View style={styles.tabContent}>
-            {activeTab === 'balance' && (
-              <View style={styles.balancePanel}>
-                <Text style={styles.balancePanelHeading}>TOTAL BALANCE</Text>
-                <Text style={styles.balanceSyncMeta}>
-                  {walletAddresses ? `Addresses synced • ${chainBalances.length} chains • ${paymasterBalances.length} paymasters` : 'Wallet not synced yet'}
-                </Text>
-                <View style={styles.balancePanelTopRow}>
-                  <Text style={styles.balancePanelAmount}>
-                    {hideBalances ? '******' : `${selectedNativeHuman} ${selectedNativeSymbol}`}
-                  </Text>
-                  <View style={styles.balanceChangePill}>
-                    <Ionicons name="trending-up" size={12} color="#16a34a" />
-                    <Text style={styles.balanceChangeText}>{selectedBalance.changePct}</Text>
-                  </View>
-                  <Pressable style={styles.balanceHideBtn} onPress={() => setHideBalances((prev) => !prev)}>
-                    <Text style={styles.balanceHideBtnText}>{hideBalances ? 'Show' : 'Hide'}</Text>
-                    <Ionicons name={hideBalances ? 'eye-outline' : 'eye-off-outline'} size={15} color="#6b7280" />
-                  </Pressable>
-                </View>
-
-                <View style={styles.balanceTokenRow}>
-                  <View style={styles.balanceTokenLeft}>
-                    <Image source={{ uri: selectedNetwork.logo }} style={styles.balanceTokenLogo} />
-                    <View>
-                      <Text style={styles.balanceTokenSymbol}>{selectedNetwork.symbol}</Text>
-                      <Text style={styles.balanceTokenChain}>{selectedNetwork.name.toUpperCase()}</Text>
-                    </View>
-                  </View>
-                  <View style={styles.balanceTokenRight}>
-                    <Text style={styles.balanceTokenUsd}>
-                      {hideBalances ? '****' : selectedBalance.usdValue}
-                    </Text>
-                    <Text style={styles.balanceTokenNative}>
-                      {hideBalances ? '****' : `${selectedNativeHuman} ${selectedNativeSymbol}`}
-                    </Text>
-                  </View>
-                </View>
-
-                {chainTokenBalances.length === 0 ? (
-                  <View style={styles.emptyState}>
-                    <Image source={require('./assets/empty-mailbox.gif')} style={styles.emptyImage} />
-                    <Text style={styles.emptyText}>No Tokens Available</Text>
-                  </View>
-                ) : (
-                  <View style={styles.profileSection}>
-                    <Text style={styles.txSectionTitle}>Chain Token Balances</Text>
-                    {chainTokenBalances.slice(0, 5).map((token) => (
-                      <View key={`${token.chain}-${token.symbol}-${token.address || 'native'}`} style={styles.statRow}>
-                        <Text style={styles.statLabel}>{token.symbol}</Text>
-                        <Text style={styles.statValue}>
-                          {typeof (token as any).balanceHuman === 'string'
-                            ? (token as any).balanceHuman
-                            : formatUnits(String((token as any).balance ?? '0'), Number((token as any).decimals ?? 18), 6)}
-                        </Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
-              </View>
-            )}
-
-            {activeTab === 'transactions' && (
-              <>
-                {recentAnyTransactions.length === 0 ? (
-                  <View style={styles.emptyState}>
-                    <Image source={require('./assets/empty-mailbox.gif')} style={styles.emptyImage} />
-                    <Text style={styles.emptyText}>No transactions yet</Text>
-                  </View>
-                ) : (
-                  <View style={styles.profileSection}>
-                    <Text style={styles.txSectionTitle}>
-                      Recent Transactions ({Math.min(recentAnyTransactions.length, 8)})
-                    </Text>
-                    {recentAnyTransactions.slice(0, 8).map((tx) => (
-                      <View key={`${tx.chain}-${tx.txHash}`} style={styles.txItem}>
-                        <View style={styles.txLeft}>
-                          <Text style={styles.txChain}>{String(tx.chain || '').toUpperCase()}</Text>
-                          <Text style={styles.txHash} numberOfLines={1}>
-                            {shortAddress(tx.txHash)}
-                          </Text>
-                        </View>
-                        <Text
-                          style={[
-                            styles.txStatus,
-                            tx.status === 'success'
-                              ? styles.txStatusSuccess
-                              : tx.status === 'failed'
-                                ? styles.txStatusFailed
-                                : styles.txStatusPending,
-                          ]}
-                        >
-                          {tx.status}
-                        </Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
-              </>
-            )}
-
-            {activeTab === 'lightning' && (
-              <View style={styles.emptyState}>
-                 <Image source={require('./assets/empty-mailbox.gif')} style={styles.emptyImage} />
-                <Text style={styles.emptyText}>No Lightning Nodes Available</Text>
-                <Pressable
-                  style={styles.primaryButton}
-                  onPress={() => Alert.alert('Lightning Nodes', 'Create or join coming soon')}
-                >
-                  <MaterialCommunityIcons name="flash" size={16} color="#fff" />
-                  <Text style={styles.primaryButtonText}>Create / Join Lightning Node</Text>
-                </Pressable>
-              </View>
-            )}
-          </View>
-        </View>
+        <WalletTabsSection
+          styles={styles}
+          activeTab={activeTab}
+          walletBusy={walletBusy}
+          walletAddresses={walletAddresses}
+          chainBalancesCount={chainBalances.length}
+          paymasterBalancesCount={paymasterBalances.length}
+          hideBalances={hideBalances}
+          selectedNativeHuman={selectedNativeHuman}
+          selectedNativeSymbol={selectedNativeSymbol}
+          selectedBalanceChangePct={selectedBalance.changePct}
+          selectedBalanceUsdValue={selectedBalance.usdValue}
+          selectedNetworkLogo={selectedNetwork.logo}
+          selectedNetworkSymbol={selectedNetwork.symbol}
+          selectedNetworkName={selectedNetwork.name}
+          chainTokenBalances={chainTokenBalances as any}
+          recentAnyTransactions={recentAnyTransactions}
+          onChangeTab={setActiveTab}
+          onRefresh={handleWalletRefresh}
+          onToggleHideBalances={() => setHideBalances((prev) => !prev)}
+          onOpenLightningInfo={() => Alert.alert('Lightning Nodes', 'Create or join coming soon')}
+          formatUnits={formatUnits}
+        />
       </ScrollView>
       )}
 
-      <Modal visible={showNetworkList} transparent animationType="fade">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>All Networks</Text>
-              <Pressable style={styles.modalClose} onPress={() => setShowNetworkList(false)}>
-                <Ionicons name="close" size={16} color="#c7c7c7" />
-              </Pressable>
-            </View>
-            <ScrollView contentContainerStyle={styles.modalContent} showsVerticalScrollIndicator={false}>
-              {NETWORK_LIST.map((group) => (
-                <View key={group.title} style={styles.modalSection}>
-                  <View style={styles.modalSectionHeader}>
-                    <Text style={styles.modalSectionTitle}>{group.title}</Text>
-                    <Ionicons name="help-circle-outline" size={12} color="#6b7280" />
-                  </View>
-                  <View style={styles.modalGrid}>
-                    {group.items.map((item) => (
-                      <Pressable
-                        key={item.id}
-                        style={[
-                          styles.modalItem,
-                          selectedNetworkId === item.id && styles.modalItemActive,
-                        ]}
-                        onPress={() => {
-                          applySelectedNetwork(item.id);
-                        }}
-                      >
-                        <View style={styles.modalItemIconWrap}>
-                        <View
-                          style={[
-                            styles.modalItemIcon,
-                            item.color && { backgroundColor: hexToRgba(item.color, 0.2) },
-                          ]}
-                        >
-                            <Image source={{ uri: item.logo }} style={styles.modalItemLogo} />
-                          </View>
-                          {item.dot && <View style={styles.modalDot} />}
-                        </View>
-                        <Text style={styles.modalSymbol}>{item.symbol}</Text>
-                        <Text style={styles.modalName}>{item.name}</Text>
-                        <View
-                          style={[
-                            styles.modalBadge,
-                            item.badge === 'EOA' ? styles.modalBadgeEoa : styles.modalBadge7702,
-                          ]}
-                        >
-                          <Text
-                            style={[
-                              styles.modalBadgeText,
-                              item.badge === 'EOA' ? styles.modalBadgeTextEoa : styles.modalBadgeText7702,
-                            ]}
-                          >
-                            {item.badge}
-                          </Text>
-                        </View>
-                      </Pressable>
-                    ))}
-                  </View>
-                </View>
-              ))}
-            </ScrollView>
-            <View style={styles.modalFooter}>
-              <Text style={styles.modalFooterText}>10 networks</Text>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      <NetworkListModal
+        visible={showNetworkList}
+        onClose={() => setShowNetworkList(false)}
+        networkList={NETWORK_LIST as any}
+        selectedNetworkId={selectedNetworkId}
+        onSelectNetwork={applySelectedNetwork}
+        hexToRgba={hexToRgba}
+        styles={styles}
+      />
 
-      <Modal
+      <WalletHistoryModal
         visible={showWalletHistoryModal}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowWalletHistoryModal(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.walletHistoryModalCard}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Wallet History</Text>
-              <Pressable style={styles.modalClose} onPress={() => setShowWalletHistoryModal(false)}>
-                <Ionicons name="close" size={16} color="#c7c7c7" />
-              </Pressable>
-            </View>
-            {walletHistory.length === 0 ? (
-              <View style={styles.emptyState}>
-                <Text style={styles.emptyText}>No wallet history yet</Text>
-              </View>
-            ) : (
-              <ScrollView contentContainerStyle={styles.modalContent} showsVerticalScrollIndicator={false}>
-                {walletHistory.map((wallet) => (
-                  <View key={wallet.id} style={styles.walletHistoryRow}>
-                    <Pressable
-                      style={styles.walletHistorySelectBtn}
-                      onPress={() => handleSwitchWallet(wallet.id)}
-                      disabled={walletBusy}
-                    >
-                      <Text style={styles.walletHistoryTitle}>
-                        {wallet.label || `Wallet ${wallet.id.slice(0, 6)}`}
-                      </Text>
-                      <Text style={styles.walletHistoryMeta}>
-                        {wallet.isActive ? 'Active' : 'Tap to switch'}
-                      </Text>
-                    </Pressable>
-                    <Pressable
-                      style={styles.walletHistoryDeleteBtn}
-                      onPress={() => handleDeleteWalletHistory(wallet.id)}
-                      disabled={walletBusy}
-                    >
-                      <Ionicons name="trash-outline" size={16} color="#ff8b8b" />
-                    </Pressable>
-                  </View>
-                ))}
-              </ScrollView>
-            )}
-          </View>
-        </View>
-      </Modal>
+        walletHistory={walletHistory}
+        walletBusy={walletBusy}
+        onClose={() => setShowWalletHistoryModal(false)}
+        onSwitchWallet={handleSwitchWallet}
+        onDeleteWallet={handleDeleteWalletHistory}
+        styles={styles}
+      />
 
       <Modal visible={showConnectModal} transparent animationType="fade" onRequestClose={() => setShowConnectModal(false)}>
         <View style={styles.actionModalOverlay}>
@@ -1902,6 +1465,18 @@ export default function App() {
                     {wcSessions.length} active connection{wcSessions.length > 1 ? 's' : ''}
                   </Text>
                 </View>
+                {(backendWcSessions.length > 0 ||
+                  pendingWcProposals.length > 0 ||
+                  Object.keys(pendingWcRequestsByTopic).length > 0) && (
+                  <Text style={styles.connectedStatusText}>
+                    Backend sessions: {backendWcSessions.length} • Pending proposals:{' '}
+                    {pendingWcProposals.length} • Pending requests:{' '}
+                    {Object.values(pendingWcRequestsByTopic).reduce(
+                      (sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0),
+                      0,
+                    )}
+                  </Text>
+                )}
 
                 <ScrollView style={styles.connectedList} contentContainerStyle={styles.connectedListContent}>
                   {wcSessions.map((session) => (
@@ -1946,6 +1521,18 @@ export default function App() {
               <>
                 <Text style={styles.connectTitle}>Connect Your Tempwallet</Text>
                 <Text style={styles.connectSubtitle}>Scan QR code to connect to a dApp</Text>
+                {(backendWcSessions.length > 0 ||
+                  pendingWcProposals.length > 0 ||
+                  Object.keys(pendingWcRequestsByTopic).length > 0) && (
+                  <Text style={styles.connectSubtitle}>
+                    Backend sessions: {backendWcSessions.length} • Pending proposals:{' '}
+                    {pendingWcProposals.length} • Pending requests:{' '}
+                    {Object.values(pendingWcRequestsByTopic).reduce(
+                      (sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0),
+                      0,
+                    )}
+                  </Text>
+                )}
 
                 {showScanner ? (
                   <View style={styles.scannerContainer}>
@@ -1989,63 +1576,21 @@ export default function App() {
         </View>
       </Modal>
 
-      <Modal visible={showSendModal} transparent animationType="fade" onRequestClose={() => setShowSendModal(false)}>
-        <View style={styles.actionModalOverlay}>
-          <View style={styles.sendModalCard}>
-            <View style={styles.sendHeaderRow}>
-              <View style={styles.sendNetworkBadge}>
-                <Image source={{ uri: selectedNetwork.logo }} style={styles.sendNetworkLogo} />
-                <Text style={styles.sendNetworkText}>{selectedNetwork.name}</Text>
-              </View>
-              <Pressable style={styles.sendChangeButton} onPress={() => setShowNetworkList(true)}>
-                <Text style={styles.sendChangeText}>CHANGE</Text>
-                <Ionicons name="chevron-down" size={12} color="#cbd5e1" />
-              </Pressable>
-              <Pressable style={styles.actionModalCloseCompact} onPress={() => setShowSendModal(false)}>
-                <Ionicons name="close" size={24} color="#e5e7eb" />
-              </Pressable>
-            </View>
-
-            <Text style={styles.sendSubtitle}>Transfer to recipient&apos;s address</Text>
-            <Text style={styles.sendLabel}>Token</Text>
-            <Text style={styles.sendTokenValue}>{selectedNativeSymbol} (native)</Text>
-
-            <Text style={styles.sendLabel}>Amount</Text>
-            <TextInput
-              value={sendAmount}
-              onChangeText={setSendAmount}
-              placeholder="0.00"
-              placeholderTextColor="#4b5563"
-              style={styles.sendInput}
-              keyboardType="decimal-pad"
-            />
-
-            <Text style={styles.sendLabel}>Recipient</Text>
-            <View style={styles.recipientRow}>
-              <TextInput
-                value={recipientAddress}
-                onChangeText={setRecipientAddress}
-                placeholder="Enter address"
-                placeholderTextColor="#6b7280"
-                style={styles.recipientInput}
-                autoCapitalize="none"
-              />
-              <Pressable style={styles.recipientIconBtn} onPress={async () => setRecipientAddress(await Clipboard.getStringAsync())}>
-                <Ionicons name="clipboard-outline" size={18} color="#d1d5db" />
-              </Pressable>
-            </View>
-
-            <View style={styles.sendFooterActions}>
-              <Pressable style={styles.sendCancelBtn} onPress={() => setShowSendModal(false)}>
-                <Text style={styles.sendCancelText}>Cancel</Text>
-              </Pressable>
-              <Pressable style={styles.sendPrimaryBtn} onPress={handleSendSubmit}>
-                <Text style={styles.sendPrimaryText}>Send</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      <SendModal
+        visible={showSendModal}
+        onClose={() => setShowSendModal(false)}
+        selectedNetworkLogo={selectedNetwork.logo}
+        selectedNetworkName={selectedNetwork.name}
+        selectedNativeSymbol={selectedNativeSymbol}
+        sendAmount={sendAmount}
+        onChangeSendAmount={setSendAmount}
+        recipientAddress={recipientAddress}
+        onChangeRecipientAddress={setRecipientAddress}
+        onPasteRecipient={async () => setRecipientAddress(await Clipboard.getStringAsync())}
+        onOpenNetworkList={() => setShowNetworkList(true)}
+        onSubmit={handleSendSubmit}
+        styles={styles}
+      />
 
       <Modal visible={showProfileModal} transparent animationType="slide" onRequestClose={() => setShowProfileModal(false)}>
         <View style={styles.actionModalOverlay}>

@@ -48,13 +48,40 @@ export class AuthController {
       let mobileRedirectUrl: string | undefined;
 
       if (state) {
+        const parseStatePayload = (raw: string) => {
+          // Google OAuth providers may return state URI-encoded once or twice.
+          // Try raw first, then progressively decode to recover JSON.
+          const attempts = [raw];
+          try {
+            attempts.push(decodeURIComponent(raw));
+          } catch {
+            // ignore decode failure
+          }
+          try {
+            attempts.push(decodeURIComponent(decodeURIComponent(raw)));
+          } catch {
+            // ignore decode failure
+          }
+          for (const candidate of attempts) {
+            try {
+              return JSON.parse(candidate);
+            } catch {
+              // try next
+            }
+          }
+          return null;
+        };
         try {
-          const stateData = JSON.parse(state);
-          fingerprint = stateData.fingerprint;
-          returnUrl = stateData.returnUrl;
-          mobileRedirectUrl = stateData.mobileRedirectUrl;
+          const stateData = parseStatePayload(state);
+          if (stateData && typeof stateData === 'object') {
+            fingerprint = (stateData as any).fingerprint;
+            returnUrl = (stateData as any).returnUrl;
+            mobileRedirectUrl = (stateData as any).mobileRedirectUrl;
+          } else {
+            // Legacy format - state is just the fingerprint
+            fingerprint = state;
+          }
         } catch {
-          // Legacy format - state is just the fingerprint
           fingerprint = state;
         }
       }
@@ -72,13 +99,16 @@ export class AuthController {
 
       // Redirect to mobile deep link if provided and allowed, otherwise frontend callback
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      const mobileCandidate =
+        (typeof mobileRedirectUrl === 'string' && mobileRedirectUrl) ||
+        (typeof returnUrl === 'string' && returnUrl) ||
+        '';
       const useMobileRedirect =
-        typeof mobileRedirectUrl === 'string' &&
-        (mobileRedirectUrl.startsWith('tempwallets://') ||
-          mobileRedirectUrl.startsWith('exp://') ||
-          mobileRedirectUrl.startsWith('https://auth.expo.io/'));
+        mobileCandidate.startsWith('tempwallets://') ||
+        mobileCandidate.startsWith('exp://') ||
+        mobileCandidate.startsWith('https://auth.expo.io/');
       const redirectUrlTarget = useMobileRedirect
-        ? (mobileRedirectUrl as string)
+        ? mobileCandidate
         : `${frontendUrl}/auth/callback`;
       const redirectUrl = new URL(redirectUrlTarget);
       redirectUrl.searchParams.set('token', accessToken);

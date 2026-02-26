@@ -20,8 +20,16 @@ async function requestWithAuth<T>(
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Request failed (${response.status})`);
+    const raw = await response.text();
+    try {
+      const parsed = raw ? JSON.parse(raw) : null;
+      const msg = Array.isArray(parsed?.message)
+        ? parsed.message.join(', ')
+        : parsed?.message || raw;
+      throw new Error(msg || `Request failed (${response.status})`);
+    } catch {
+      throw new Error(raw || `Request failed (${response.status})`);
+    }
   }
 
   return response.json() as Promise<T>;
@@ -43,6 +51,11 @@ export type WalletHistoryEntry = {
 export type ChainBalance = {
   chain: string;
   balance: string;
+};
+
+export type RefreshBalancesResponse = {
+  success: boolean;
+  balances: ChainBalance[];
 };
 
 export type AnyAsset = {
@@ -115,6 +128,22 @@ export const walletApi = {
     let endpoint = withUserId('/wallet/balances', options?.userId);
     if (options?.refresh) endpoint = `${endpoint}${endpoint.includes('?') ? '&' : '?'}refresh=true`;
     return requestWithAuth<ChainBalance[]>(baseUrl, token, endpoint);
+  },
+
+  refreshBalances(
+    baseUrl: string,
+    token: string | null | undefined,
+    payload: { userId?: string | null | undefined }
+  ) {
+    return requestWithAuth<RefreshBalancesResponse>(
+      baseUrl,
+      token,
+      '/wallet/balances/refresh',
+      {
+        method: 'POST',
+        body: JSON.stringify({ userId: payload.userId }),
+      }
+    );
   },
 
   getAssetsAny(baseUrl: string, token: string | null | undefined, options?: WalletRequestOptions & { refresh?: boolean }) {

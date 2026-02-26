@@ -17,8 +17,16 @@ async function requestWithAuth<T>(
   });
 
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Request failed with ${response.status}`);
+    const raw = await response.text();
+    try {
+      const parsed = raw ? JSON.parse(raw) : null;
+      const message = Array.isArray(parsed?.message)
+        ? parsed.message.join(', ')
+        : parsed?.message || raw;
+      throw new Error(message || `Request failed with ${response.status}`);
+    } catch {
+      throw new Error(raw || `Request failed with ${response.status}`);
+    }
   }
 
   return response.json() as Promise<T>;
